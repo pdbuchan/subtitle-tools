@@ -38,8 +38,8 @@ Each tool has its own directory at the repository root. A single-file program ke
 | [`samples/`](samples/) | Encoding | Sample text files in many languages and character encodings for testing detection tools. |
 | [`time-diff/`](time-diff/) | Time | Calculate the difference between two timestamps entered interactively. |
 | [`time-add/`](time-add/) | Time | Add two timestamps entered interactively. |
-| [`pgs/`](pgs/) | PGS | Analyze Blu-ray PGS `.sup` subtitles, extract bitmaps, or offset/synchronize timestamps. |
-| [`dvb/`](dvb/) | DVB | Analyze an isolated DVB subtitle stream in an MPEG-2 transport stream and optionally extract bitmaps. |
+| [`pgs/`](pgs/) | PGS | Analyze Blu-ray PGS `.sup` subtitles, extract subtitle bitmaps, or offset/synchronize timestamps. |
+| [`dvb/`](dvb/) | DVB | Analyze an isolated DVB subtitle stream in an MPEG-2 transport stream and optionally extract subtitle bitmaps. |
 | [`chapters/`](chapters/) | Chapters | Generate an XML chapters file from a feature duration and desired chapter count. |
 | [`bt709/`](bt709/) | Colorspace | Derive BT.709 RGB/YCbCr colorspace constants from the standard color primaries. |
 | [`ycbcr2rgb/`](ycbcr2rgb/) | Colorspace | Convert BT.709 YCbCr values to 8-bit sRGB. |
@@ -64,10 +64,6 @@ Every tool's README also gives its individual build and usage command. The color
 ## Generated files
 
 Several programs write fixed output names such as `out.srt`, `out.txt`, `sub.out`, `pgs.out`, `dvb.out`, or bitmap files. Run a tool in a working directory where those output names will not overwrite files you need.
-
-## Source and background
-
-These programs were originally documented at <https://www.pdbuchan.com/subtitles/subtitles.html>.
 
 ## License
 
