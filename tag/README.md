@@ -4,7 +4,7 @@ Transfers supported formatting tags from one SubRip file to the text of another.
 
 The two SRT files must contain the same number of subtitles and the same number of lines in each subtitle. Because the text can differ, `tag` only handles opening tags at the beginning of a line and closing tags at the end of a line. The Byte Order Mark from the text input is preserved.
 
-The following are some examples of in-line format tag position arrangements that `tag` can process:
+The following are some examples of in-line markup tag position arrangements that `tag` can process:
 
 ```sh
 2
