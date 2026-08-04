@@ -1,6 +1,6 @@
 # txtfiles2srt
 
-Creates one SubRip file from a collection of individual subtitle text files. The start and end timestamps are read from each filename. No Byte Order Mark is prepended.
+Creates one SubRip file from a collection of individual subtitle text files. The start and end timestamps are read from each filename. No Byte Order Mark is prepended. This is typically used when subtitles were OCR's from a hard-subbed video file and saved as individual text files.
 
 Each subtitle text file should contain only subtitle text, without blank lines or trailing line feeds. Filenames must use this form:
 

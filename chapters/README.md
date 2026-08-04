@@ -1,6 +1,6 @@
 # chapters
 
-Creates an XML chapters file from a feature duration and a desired number of chapters. The resulting `chapters.xml` can be added to a media container with software such as MKVToolNix GUI.
+Creates an XML chapters file from a feature duration and a desired number of chapters. The resulting `chapters.xml` can be added to a media container with software such as [MKVToolNix](https://mkvtoolnix.org/).
 
 The duration uses the same notation printed by FFmpeg, including a fractional part of a second, rather than the comma-separated millisecond notation used by SubRip files. A duration can be obtained with:
 

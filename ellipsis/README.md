@@ -1,6 +1,6 @@
 # ellipsis
 
-Removes SubRip entries whose text consists only of ellipsis marks, including common one-line and two-line forms made from `...` or the bogus form `---`. An input Byte Order Mark is preserved.
+Removes SubRip entries whose text consists only of ellipsis marks, including common one-line and two-line forms made from `...` or the bogus form `---`. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 

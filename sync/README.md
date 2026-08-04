@@ -1,6 +1,6 @@
 # sync
 
-Synchronizes all timestamps in a SubRip file to two user-supplied anchor points. Subtitle durations are preserved, and an input Byte Order Mark is retained.
+Synchronizes all timestamps in a SubRip file to two user-supplied anchor points. Subtitle durations are preserved. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 
@@ -14,7 +14,7 @@ gcc -Wall sync.c -o sync
 ./sync inputfilename.srt
 ```
 
-The program writes `out.srt` and asks for:
+The program asks for:
 
 1. The current start timestamp of an early subtitle.
 2. The current start timestamp of a late subtitle.
@@ -31,6 +31,8 @@ Current start timestamp for last anchor point subtitle (hh:mm:ss,ms)? 01:31:29,2
 New start timestamp for first anchor point subtitle (hh:mm:ss,ms)? 00:00:22,280
 New start timestamp for last anchor point subtitle (hh:mm:ss,ms)? 01:31:25,000
 ```
+
+The output file is `out.srt`.
 
 ## License
 

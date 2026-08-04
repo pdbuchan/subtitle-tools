@@ -1,6 +1,6 @@
 # fixtag
 
-Finds and repairs common markup-tag errors in a SubRip file. Supported tags include italics, bold, underline, strikethrough, font color, font size, and position. An input Byte Order Mark is preserved.
+Finds and repairs common markup-tag errors in a SubRip file. Supported tags include italics, bold, underline, strikethrough, font color, font size, and position. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 

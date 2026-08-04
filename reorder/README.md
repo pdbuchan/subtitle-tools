@@ -1,6 +1,6 @@
 # reorder
 
-Sorts subtitles in a SubRip file by starting timestamp. An input Byte Order Mark is preserved.
+Sorts subtitles in a SubRip file by starting timestamp. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 

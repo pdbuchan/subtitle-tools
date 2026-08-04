@@ -1,6 +1,6 @@
 # split
 
-Splits every SubRip subtitle into two identical subtitles with consecutive timestamps. It was created to generate test files for [`combine`](../combine/). An input Byte Order Mark is preserved.
+Splits every SubRip subtitle into two identical subtitles with consecutive timestamps. It was created to generate test files for [`combine`](../combine/). If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 

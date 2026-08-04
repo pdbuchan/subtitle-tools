@@ -1,6 +1,6 @@
 # long
 
-Joins each two-line SubRip subtitle into a single line so complete sentences can be presented to a machine translator. The program is designed for characters encountered in English and French. It also changes standalone bogus ellipsis marks (`---`) to `...`. An input Byte Order Mark is preserved.
+Joins each two-line SubRip subtitle into a single line so complete sentences can be presented to a machine translator. The program is designed for characters encountered in English and French. It also changes standalone bogus ellipsis marks (`---`) to `...`. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 Use this tool after removing markup with [`striptag`](../striptag/).
 

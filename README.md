@@ -8,42 +8,90 @@ Before processing a SubRip file with another tool, it is generally a good idea t
 
 Each tool has its own directory at the repository root. A single-file program keeps its source file and README directly in that directory; larger projects such as `sub`, `pgs`, and `dvb` retain their existing multi-file layouts. An additional `src/` layer would not add useful organization here and would make individual tools less convenient to browse and build.
 
-## Tools
+## Check Tool
 
-| Directory | Category | Description |
-|---|---|---|
-| [`check/`](check/) | SubRip | Validate a SubRip (`.srt`) file and report formatting errors and numbering or chronology warnings. |
-| [`offset/`](offset/) | SubRip | Apply a positive, negative, or zero timestamp offset, preserve durations, and renumber subtitles. |
-| [`sync/`](sync/) | SubRip | Synchronize all timestamps to two user-supplied anchor points while preserving subtitle durations. |
-| [`sub/`](sub/) | VobSub | Analyze an `.idx`/`.sub` pair, extract subtitle bitmaps, or offset/synchronize timestamps. |
-| [`txtfiles2srt/`](txtfiles2srt/) | Conversion | Create one SubRip file from individual text files whose filenames contain start and end timestamps. |
-| [`ssa2srt/`](ssa2srt/) | Conversion | Convert SubStation Alpha subtitles to SubRip while transferring supported styles and markup. |
-| [`ssa2srt-nostyles/`](ssa2srt-nostyles/) | Conversion | Convert SubStation Alpha subtitles to SubRip without transferring style definitions. |
-| [`reorder/`](reorder/) | SubRip | Sort subtitles chronologically by starting timestamp. |
-| [`srt2txt/`](srt2txt/) | Conversion | Extract subtitle text from an SRT file, optionally without blank lines between subtitles. |
-| [`txt2srt/`](txt2srt/) | Conversion | Combine timestamps from an SRT file with translated or edited text from a text file. |
-| [`tag/`](tag/) | Formatting | Transfer supported formatting tags from one SRT file to the text of another. |
-| [`fixtag/`](fixtag/) | Formatting | Find and repair common SRT markup-tag errors, with an option to add missing closing tags. |
-| [`striptag/`](striptag/) | Formatting | Remove all or selected markup-tag classes from an SRT file. |
-| [`long/`](long/) | Formatting | Join two-line subtitles into one line for machine translation workflows. |
-| [`ellipsis/`](ellipsis/) | Formatting | Remove subtitles containing only ellipsis marks or common bogus ellipsis forms. |
-| [`time-text/`](time-text/) | Conversion | Combine timestamps from one SRT file with subtitle text from another. |
-| [`combine/`](combine/) | SubRip | Merge identical subtitles that have immediately adjacent timestamps. |
-| [`split/`](split/) | Testing | Split each subtitle into two identical consecutive subtitles for testing `combine`. |
-| [`readbom/`](readbom/) | Encoding | Identify a Byte Order Mark in an SRT or text file. |
-| [`writebom/`](writebom/) | Encoding | Prepend a selected Byte Order Mark when one is not already present. |
-| [`stripbom/`](stripbom/) | Encoding | Remove a Byte Order Mark from an SRT or text file. |
-| [`ced/`](ced/) | Encoding | Command-line adaptation of Google Compact Encoding Detection for text and SRT files. |
-| [`enc/`](enc/) | Encoding | Detect likely encoding, convert text to UTF-8 with `iconv`, and optionally add a UTF-8 BOM. |
-| [`samples/`](samples/) | Encoding | Sample text files in many languages and character encodings for testing detection tools. |
-| [`time-diff/`](time-diff/) | Time | Calculate the difference between two timestamps entered interactively. |
-| [`time-add/`](time-add/) | Time | Add two timestamps entered interactively. |
-| [`pgs/`](pgs/) | PGS | Analyze Blu-ray PGS `.sup` subtitles, extract subtitle bitmaps, or offset/synchronize timestamps. |
-| [`dvb/`](dvb/) | DVB | Analyze an isolated DVB subtitle stream in an MPEG-2 transport stream and optionally extract subtitle bitmaps. |
-| [`chapters/`](chapters/) | Chapters | Generate an XML chapters file from a feature duration and desired chapter count. |
-| [`bt709/`](bt709/) | Colorspace | Derive BT.709 RGB/YCbCr colorspace constants from the standard color primaries. |
-| [`ycbcr2rgb/`](ycbcr2rgb/) | Colorspace | Convert BT.709 YCbCr values to 8-bit sRGB. |
-| [`rgb2ycbcr/`](rgb2ycbcr/) | Colorspace | Convert 8-bit sRGB values to BT.709 YCbCr. |
+| Directory | Description |
+|---|---|
+| [`check/`](check/) | Validate a SubRip (`.srt`) file and report formatting errors and numbering or chronology warnings. |
+
+## Time and Order Adjustment Tools
+| Directory | Description |
+|---|---|
+| [`offset/`](offset/) | Apply a positive, negative, or zero timestamp offset, preserve durations, and renumber subtitles. |
+| [`sync/`](sync/) | Synchronize all timestamps to two user-supplied anchor points while preserving subtitle durations. |
+| [`reorder/`](reorder/) | Sort subtitles chronologically by starting timestamp. |
+| [`time-text/`](time-text/) | Combine timestamps from one SRT file with subtitle text from another. |
+
+## Chapter Tool
+| Directory | Description |
+|---|---|
+| [`chapters/`](chapters/) | Generate an XML chapters file from a feature duration and desired chapter count. |
+
+## VobSub, PGS, and DVB Subtitle Tools
+| Directory | Description |
+|---|---|
+| [`sub/`](sub/) | Analyze an `.idx`/`.sub` pair, extract subtitle bitmaps, or offset/synchronize timestamps. |
+| [`pgs/`](pgs/) | Analyze Blu-ray PGS `.sup` subtitles, extract subtitle bitmaps, or offset/synchronize timestamps. |
+| [`dvb/`](dvb/) | Analyze an isolated DVB subtitle stream in an MPEG-2 transport stream and optionally extract subtitle bitmaps. |
+
+## Post-OCR Tool
+| Directory | Description |
+|---|---|
+| [`txtfiles2srt/`](txtfiles2srt/) | Create one SubRip file from individual text files whose filenames contain start and end timestamps. |
+
+## In-Line Markup Tag Tools
+| Directory | Description |
+|---|---|
+| [`fixtag/`](fixtag/) | Find and repair common SRT markup-tag errors, with an option to add missing closing tags. |
+| [`striptag/`](striptag/) | Remove all or selected markup-tag classes from an SRT file. |
+| [`tag/`](tag/) | Transfer supported formatting tags from one SRT file to the text of another. |
+
+## Contiguous Subtitle Combine / Split Tools
+| Directory | Description |
+|---|---|
+| [`combine/`](combine/) | Merge identical subtitles that have immediately adjacent timestamps. |
+| [`split/`](split/) | Split each subtitle into two identical consecutive subtitles for testing `combine`. |
+
+## Tools for Aiding in Translation Preparation
+| Directory | Description |
+|---|---|
+| [`ellipsis/`](ellipsis/) | Remove subtitles containing only ellipsis marks or common bogus ellipsis forms. |
+| [`long/`](long/) | Join two-line subtitles into one line for machine translation workflows. |
+| [`srt2txt/`](srt2txt/) | Extract subtitle text from an SRT file, optionally without blank lines between subtitles. |
+| [`txt2srt/`](txt2srt/) | Combine timestamps from an SRT file with translated or edited text from a text file. |
+
+## SubStation Alpha Tools
+| Directory | Description |
+|---|---|
+| [`ssa2srt/`](ssa2srt/) | Convert SubStation Alpha subtitles to SubRip while transferring supported styles and markup. |
+| [`ssa2srt-nostyles/`](ssa2srt-nostyles/) | Convert SubStation Alpha subtitles to SubRip without transferring style definitions. |
+
+## Byte Order Mark Tools
+| Directory | Description |
+|---|---|
+| [`readbom/`](readbom/) | Identify a Byte Order Mark in an SRT or text file. |
+| [`writebom/`](writebom/) | Prepend a selected Byte Order Mark when one is not already present. |
+| [`stripbom/`](stripbom/) | Remove a Byte Order Mark from an SRT or text file. |
+
+## Character Encoding Tools
+| Directory | Description |
+|---|---|
+| [`ced/`](ced/) | Command-line adaptation of Google Compact Encoding Detection for text and SRT files. |
+| [`enc/`](enc/) | Detect likely encoding, convert text to UTF-8 with `iconv`, and optionally add a UTF-8 BOM. |
+| [`samples/`](samples/) | Sample text files in many languages and character encodings for testing detection tools. |
+
+## Handy Timestamp Tools
+| Directory | Description |
+|---|---|
+| [`time-diff/`](time-diff/) | Calculate the difference between two timestamps entered interactively. |
+| [`time-add/`](time-add/) | Add two timestamps entered interactively. |
+
+## Colorspace tools
+| Directory | Description |
+|---|---|
+| [`bt709/`](bt709/) | Derive BT.709 RGB/YCbCr colorspace constants from the standard color primaries. |
+| [`ycbcr2rgb/`](ycbcr2rgb/) | Convert BT.709 YCbCr values to 8-bit sRGB. |
+| [`rgb2ycbcr/`](rgb2ycbcr/) | Convert 8-bit sRGB values to BT.709 YCbCr. |
 
 ## Building
 

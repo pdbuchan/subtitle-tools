@@ -1,6 +1,6 @@
 # striptag
 
-Removes markup tags from a SubRip file. Supported classes include italics, bold, underline, strikethrough, font color, font size, and position. An input Byte Order Mark is preserved.
+Removes markup tags from a SubRip file. Supported classes include italics, bold, underline, strikethrough, font color, font size, and position. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 

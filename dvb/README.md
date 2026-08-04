@@ -25,7 +25,7 @@ make
 
 The normal report is `dvb.out`. With the `bmp` option, bitmap files are also produced.
 
-Unlike the VobSub and PGS tools, this program does not offset or synchronize timestamps because PTS and DTS values are nested inside PES packets carried by transport-stream packets.
+Unlike the [VobSub](sub/) and [PGS](pgs/) tools, this program does not have the option to offset or synchronize timestamps because PTS and DTS values are nested inside PES packets carried by transport-stream packets.
 
 ## License
 

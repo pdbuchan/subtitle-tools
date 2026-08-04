@@ -1,6 +1,6 @@
 # srt2txt
 
-Extracts only the text lines from a SubRip file. This is useful when sending subtitle text to a translation tool without including subtitle numbers and timestamps. An input Byte Order Mark is preserved.
+Extracts only the text lines from a SubRip file. This is useful when sending subtitle text to a translation tool without including subtitle numbers and timestamps. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 

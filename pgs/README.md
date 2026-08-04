@@ -22,7 +22,7 @@ Options are used one at a time:
 | `offset` | Apply user-entered timestamp offsets and write `out.sup`. |
 | `sync` | Synchronize timestamps to user-entered anchor points and write `out.sup`. |
 
-The normal report is `pgs.out`.
+The report filen ame is `pgs.out`.
 
 ## License
 

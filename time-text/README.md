@@ -1,6 +1,6 @@
 # time-text
 
-Creates a SubRip file using timestamps from one SRT file and subtitle text from another. The two files should contain the same number of subtitles. A Byte Order Mark in the text input is preserved.
+Creates a SubRip file using timestamps from one SRT file and subtitle text from another. The two files should contain the same number of subtitles. If present, the Byte Order Mark (BOM) of the input text file will be included in the output file.
 
 ## Build
 

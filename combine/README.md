@@ -1,6 +1,6 @@
 # combine
 
-Combines identical subtitles when their timestamps are immediately adjacent, meaning there is no interval in which no subtitle is displayed. The merged entry uses the first subtitle's start time and the last subtitle's end time. An input Byte Order Mark is preserved.
+Combines identical subtitles when their timestamps are immediately adjacent, meaning there is no interval in which no subtitle is displayed. The merged entry uses the first subtitle's start time and the last subtitle's end time. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 

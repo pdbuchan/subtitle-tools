@@ -24,7 +24,9 @@ Options are used one at a time:
 | `offset` | Apply user-entered offsets and write `out.idx` and `out.sub`. |
 | `sync` | Synchronize timestamps to user-entered anchor points and write `out.idx` and `out.sub`. |
 
-The normal report is `sub.out`. This report can be similar in size to the input `.sub` file.
+Use of the `sync` option is the same as for the [`sync/`](sync/) tool.
+
+The report file name is `sub.out`. This report can be similar in size to the input `.sub` file.
 
 Bitmap filenames include start and end times, language ID, and language index. The language index distinguishes multiple streams that use the same language ID.
 
