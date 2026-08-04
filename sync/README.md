@@ -23,7 +23,27 @@ The program asks for:
 
 Choose anchors near the beginning and end of the feature to maximize scaling accuracy.
 
-Example input:
+For example, if the existing timestamps for subtitles appearing early and late in the feature are:
+
+"first":
+
+`00:00:29,280 --> 00:00:31,880`
+
+"last":
+
+`01:31:29,280 --> 01:31:30,920`
+
+and new start times for these subtitles are to be:
+
+"first":
+
+`00:00:22,280`
+
+"last":
+
+`01:31:25,000`
+
+then you would use sync.c like this:
 
 ```text
 Current start timestamp for first anchor point subtitle (hh:mm:ss,ms)? 00:00:29,280

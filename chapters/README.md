@@ -10,7 +10,7 @@ ffmpeg -i filename.mkv
 
 A typical result would look like:
 
-```sh
+```text
 Input #0, matroska,webm, from 'filename.mkv':
   Metadata:
     encode          : TMPGEnc Video Mastering Works 7 Version 7.0.30.33
@@ -18,8 +18,6 @@ Input #0, matroska,webm, from 'filename.mkv':
   Duration: 01:29:53.83, start: 0.000000, bitrate: 6681 kb/s
   Stream #0:0: Video: h264 (High), yuv420p(tv, bt709, progressive), 1920x1080 [SAR 1:1 DAR 16:9], 23.98 fps, 23.98 tbr, 1k tbn (default)
   Stream #0:1: Audio, aac (Main), 48000 Hz, stereo, fltp (default)
-
-etc...
 ```
 
 Here, the duration to use in `chapters` is `01:29:53.83`, which you can simply copy and paste.

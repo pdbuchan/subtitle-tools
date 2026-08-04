@@ -10,7 +10,7 @@ ffmpeg -i feature.ts
 
 A typical result might look like:
 
-```sh
+```text
 Input #0, mpegts, from feature.ts:
   Duration: 00:50:24.55, start: 0.060000, bitrate: 13418 kb/s
   Program 19401 
