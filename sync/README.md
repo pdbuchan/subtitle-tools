@@ -43,7 +43,7 @@ and new start times for these subtitles are to be:
 
 `01:31:25,000`
 
-then you would use sync.c like this:
+then you would use `sync` like this:
 
 ```text
 Current start timestamp for first anchor point subtitle (hh:mm:ss,ms)? 00:00:29,280
