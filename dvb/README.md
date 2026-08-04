@@ -2,7 +2,7 @@
 
 Analyzes an isolated DVB subtitle stream stored in an MPEG-2 transport stream (`.ts`) and writes a report. It can optionally produce one bitmap per subtitle. Unlike the [VobSub](sub/) and [PGS](pgs/) tools, this program does not have the option to offset or synchronize timestamps because PTS and DTS timestamps are carried in PES packets which are, in turn, carried by transport-stream packets. i.e., there isn't visibility between layers.
 
-The input transport stream must contain only one DVB subtitle stream, without audio or video. Use FFmpeg to list all streams and extract the desired DVB subtitle stream first:
+The input transport stream must contain only one DVB subtitle stream, without audio or video. Use FFmpeg to list all streams first:
 
 ```sh
 ffmpeg -i feature.ts
@@ -10,7 +10,7 @@ ffmpeg -i feature.ts
 
 A typical result might look like:
 
-``sh
+```sh
 Input #0, mpegts, from feature.ts:
   Duration: 00:50:24.55, start: 0.060000, bitrate: 13418 kb/s
   Program 19401 
