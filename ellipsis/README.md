@@ -2,17 +2,11 @@
 
 Read an existing SubRip file and remove any subtitles consisting of only one of the following:
 
-`...\n`
-`...\n...\n`
-` ...\n...\n`
-`...\n ...\n`
+`...\n`, `...\n...\n`, ` ...\n...\n`, or `...\n ...\n`
 
 or bogus ellipsis marks:
 
-`---\n`
-`---\n---\n`
-` ---\n---\n`
-`---\n ---\n`
+`---\n`, `---\n---\n`, ` ---\n---\n`, or `---\n ---\n`
 
 If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
