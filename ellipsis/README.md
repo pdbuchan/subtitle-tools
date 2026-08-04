@@ -1,6 +1,20 @@
 # ellipsis
 
-Removes SubRip entries whose text consists only of ellipsis marks, including common one-line and two-line forms made from `...` or the bogus form `---`. If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
+Read an existing SubRip file and remove any subtitles consisting of only one of the following:
+
+`...\n`
+`...\n...\n`
+` ...\n...\n`
+`...\n ...\n`
+
+or bogus ellipsis marks:
+
+`---\n`
+`---\n---\n`
+` ---\n---\n`
+`---\n ---\n`
+
+If present, the Byte Order Mark (BOM) of the input file will be included in the output file.
 
 ## Build
 
