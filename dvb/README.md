@@ -23,7 +23,7 @@ Input #0, mpegts, from feature.ts:
   Stream #0:6[0x7e0](888,dut): Subtitle: dvb_subtitle ([6][0][0][0] / 0x0006) (hearing impaired)
 ```
 
-In this case there are two Dutch DVB subtitles streams: #`0:5`, and an SDH Stream #`0:6`. Note that Stream #`0:4` is DVB TeleText and not subtitles. You can then extract only the desired DVB subtitle stream. In this case let's use Stream #`0:6`.
+In this case there are two Dutch DVB subtitle streams: #`0:5`, and an SDH Stream #`0:6`. Note that Stream #`0:4` is DVB TeleText and not subtitles. You can then extract only the desired DVB subtitle stream. In this case let's use Stream #`0:6`.
 
 ```sh
 ffmpeg -i feature.ts -map 0:6 -c:s copy filename.ts
