@@ -55,7 +55,7 @@ Each tool has its own directory at the repository root. A single-file program ke
 ## Tools for Aiding in Translation Preparation
 When machine-translating a SubRip (`.srt`) from one language to another, you can improve the results by removing markup tags, timestamps, and keeping sentences on a single line. A typical workflow might consist of:
 
-1. Removing all in-line markup tags using [`striptag'](striptag/).
+1. Removing all in-line markup tags using [`striptag`](striptag/).
 2. Removing any lines containing only ellipses ("...") using [`ellipsis`](ellipsis/). These are common in French SDH subtitles, but often undesirable in other languages.
 3. Combine adjacent subtitles that have contiguous timestamps using [`combine`](combine/). i.e., the end timestamp of one subtitle is also the start timestamp of the subsequent subtitle.
 4. Join two lines of text which are part of the same sentence using [`long`](long/).
