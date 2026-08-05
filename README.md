@@ -42,8 +42,8 @@ Each tool has its own directory at the repository root. A single-file program ke
 ## In-Line Markup Tag Tools
 | Directory | Description |
 |---|---|
-| [`fixtag/`](fixtag/) | Find and repair common SRT markup-tag errors, with an option to add missing closing tags. |
-| [`striptag/`](striptag/) | Remove all or selected markup-tag classes from an SRT file. |
+| [`fixtag/`](fixtag/) | Find and repair common SRT markup tag errors, with an option to add missing closing tags. |
+| [`striptag/`](striptag/) | Remove all or selected markup tag classes from an SRT file. |
 | [`tag/`](tag/) | Transfer supported formatting tags from one SRT file to the text of another. |
 
 ## Contiguous Subtitle Combine / Split Tools
