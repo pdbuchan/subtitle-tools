@@ -57,8 +57,8 @@ When machine-translating a SubRip (`.srt`) file from one language to another, yo
 
 1. Removing all in-line markup tags using [`striptag`](striptag/).
 2. Removing any lines containing only ellipses ("...") using [`ellipsis`](ellipsis/). These are common in French SDH subtitles, but often undesirable in other languages.
-3. Combine adjacent subtitles that have contiguous timestamps using [`combine`](combine/). i.e., the end timestamp of one subtitle is also the start timestamp of the subsequent subtitle.
-4. Join two lines of text which are part of the same sentence using [`long`](long/).
+3. Combining adjacent subtitles that have contiguous timestamps using [`combine`](combine/). i.e., the end timestamp of one subtitle is also the start timestamp of the subsequent subtitle.
+4. Joining two lines of text which are part of the same sentence using [`long`](long/).
 5. Removing subtitle numbering and timestamps using [`srt2txt`](srt2txt/)
 6. Passing the resulting text file to a translation service such as [DeepL](https://www.deepl.com).
 7. Adding back subtitle numbering and timestamps using [`txt2srt`](txt2srt/).
