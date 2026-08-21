@@ -16,35 +16,18 @@
 
 #include "pgs.h"
 
-// Look up framerate (fps) by framerate ID.
+// Look up framerate (fps) by framerate ID. Return 0.0 for unknown/reserved IDs.
 double
 framerates (uint8_t id) {
 
   switch (id) {
-
-    case 0x10:
-      return (24000.0 / 1001.0);
-
-    case 0x20:
-      return (24.0);
-
-    case 0x30:  // PAL progressive
-      return (25.0);
-
-    case 0x40:  // NTSC progressive
-      return (30000.0 / 1001);
-
-    case 0x50:
-      return (30.0);
-
-    case 0x60:  // PAL interlaced
-      return (50.0);
-
-    case 0x70:  // NTSC interlaced
-      return (60000.0 / 1001.0);
-
-    default:
-      return (23.976);
-
+    case 0x10: return (24000.0 / 1001.0);
+    case 0x20: return 24.0;
+    case 0x30: return 25.0;
+    case 0x40: return (30000.0 / 1001.0);
+    case 0x50: return 30.0;
+    case 0x60: return 50.0;
+    case 0x70: return (60000.0 / 1001.0);
+    default: return 0.0;
   }
 }

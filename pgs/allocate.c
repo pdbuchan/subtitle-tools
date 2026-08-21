@@ -16,149 +16,51 @@
 
 #include "pgs.h"
 
-// Allocate memory for an array of chars.
+static void *
+allocate_zeroed (size_t len, size_t item_size, const char *name) {
+
+  void *tmp;
+
+  if (len == 0 || item_size == 0 || len > SIZE_MAX / item_size) {
+    fprintf (stderr, "Cannot allocate memory for %s: invalid size.\n", name);
+    exit (EXIT_FAILURE);
+  }
+
+  tmp = calloc (len, item_size);
+  if (tmp == NULL) {
+    fprintf (stderr, "Cannot allocate memory for %s.\n", name);
+    exit (EXIT_FAILURE);
+  }
+
+  return tmp;
+}
+
 char *
-allocate_strmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_strmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_strmem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_strmem (size_t len) {
+  return allocate_zeroed (len, sizeof (char), "character array");
 }
 
-// Allocate memory for an array of uint8_t.
-uint8_t *
-allocate_u8mem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_u8mem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (uint8_t *) malloc (len * sizeof (uint8_t));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (uint8_t));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_u8mem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of PALETTE structs.
 PALETTE *
-allocate_pdsmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_pdsmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (PALETTE *) malloc (len * sizeof (PALETTE));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (PALETTE));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_pdsmem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_pdsmem (size_t len) {
+  return allocate_zeroed (len, sizeof (PALETTE), "PALETTE array");
 }
 
-// Allocate memory for an array of PALETTE_ENTRY structs.
 PALETTE_ENTRY *
-allocate_palentrymem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_palentrymem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (PALETTE_ENTRY *) malloc (len * sizeof (PALETTE_ENTRY));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (PALETTE_ENTRY));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_palentrymem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_palentrymem (size_t len) {
+  return allocate_zeroed (len, sizeof (PALETTE_ENTRY), "PALETTE_ENTRY array");
 }
 
-// Allocate memory for an array of SYNC structs.
 SYNC *
-allocate_syncmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_syncmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (SYNC *) malloc (len * sizeof (SYNC));
-  if (tmp != NULL) { 
-    memset (tmp, 0, len * sizeof (SYNC));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_syncmem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_syncmem (size_t len) {
+  return allocate_zeroed (len, sizeof (SYNC), "SYNC array");
 }
 
-// Allocate memory for an array of OBJECT structs.
 OBJECT *
-allocate_objmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_objmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (OBJECT *) malloc (len * sizeof (OBJECT));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (OBJECT));
-    return (tmp); 
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_objmem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_objmem (size_t len) {
+  return allocate_zeroed (len, sizeof (OBJECT), "OBJECT array");
 }
 
-// Allocate memory for an array of CHANGE structs.
 CHANGE *
-allocate_changemem (int len) {
-
-  void *tmp; 
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_changemem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (CHANGE *) malloc (len * sizeof (CHANGE));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (CHANGE));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_chagemem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_changemem (size_t len) {
+  return allocate_zeroed (len, sizeof (CHANGE), "CHANGE array");
 }

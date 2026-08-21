@@ -16,45 +16,43 @@
 
 #include "pgs.h"
 
+static int parse_integer_input (const char *, const char *);
+static void copy_filename (char *, const char *);
+static int presentation_changed (uint8_t, uint16_t, size_t, const COMPOSITION_OBJECT *, const STATE *);
+static void record_sub_start (SYNC *, size_t, SUB *, HEAD *);
+static void record_sub_end (SYNC *, size_t, SUB *, HEAD *);
+
 int
 main (int argc, char **argv) {
 
-  size_t i, j, suplen, index, nsubs;
-  int fi;
+  size_t i, suplen, index, nsubs = 0;
+  int fi, pass, npasses;
   uint8_t *sup;
   TIME time;
-  OPTIONS options;
-  HEAD head;
+  OPTIONS options = {0};
+  HEAD head = {0};
   PALETTE *palette;
   OBJECT *object;
-  SUB sub;
-  STATE state;
+  SUB sub = {0};
+  STATE state = {0};
   SYNC *sync;
-  char *temp, *filename, *timestamp, *endptr;
+  char *temp, *filename, *timestamp;
   FILE *fo;
 
-  // Allocate memory for various arrays.
   filename = allocate_strmem (MAX_STRINGLEN);
 
-  // Process the command line arguments, if any.
-  options.makebmp_flag = 0;  // Default to not make bitmap files.
-  options.offset_flag = 0;  // Default to not applying PTS and DTS timestamp offsets.
-  options.sync_flag = 0;  // Default to not resynchronizing PTS and DTS timestamps.
+  // Process command-line arguments.
   if (argc == 2) {
-    strncpy (filename, argv[1], MAX_STRINGLEN);
-
-  } else if ((argc == 3) && (strncmp (argv[2], "bmp", 3) == 0)) {
-    strncpy (filename, argv[1], MAX_STRINGLEN);
+    copy_filename (filename, argv[1]);
+  } else if (argc == 3 && strcmp (argv[2], "bmp") == 0) {
+    copy_filename (filename, argv[1]);
     options.makebmp_flag = 1;
-
-  } else if ((argc == 3) && (strncmp (argv[2], "offset", 6) == 0)) {
-    strncpy (filename, argv[1], MAX_STRINGLEN);
+  } else if (argc == 3 && strcmp (argv[2], "offset") == 0) {
+    copy_filename (filename, argv[1]);
     options.offset_flag = 1;
-
-  } else if ((argc == 3) && (strncmp (argv[2], "sync", 6) == 0)) {
-    strncpy (filename, argv[1], MAX_STRINGLEN);
+  } else if (argc == 3 && strcmp (argv[2], "sync") == 0) {
+    copy_filename (filename, argv[1]);
     options.sync_flag = 1;
-
   } else {
     fprintf (stdout, "\npgs - A tool to analyze a PGS (.sup) file and produce a report file.\n");
     fprintf (stdout, "      The .sup file can be extracted from BluRay or UHD BluRay (i.e., 1080p versus 2160p BDs).\n");
@@ -69,7 +67,7 @@ main (int argc, char **argv) {
     fprintf (stdout, "\nOffset notes:\n");
     fprintf (stdout, "  The user can supply positive or negative hours, minutes, seconds, and millisecond offsets to be applied to all PTS and DTS timestamps in out.sup file.\n");
     fprintf (stdout, "\nSynchronization notes:\n");
-    fprintf (stdout, "  Subtitle durations are preserved.\n");
+    fprintf (stdout, "  Subtitle durations are preserved when a PCS provides a distinct ending timestamp.\n");
     fprintf (stdout, "  Synchronization of all PGS timestamps in a PGS (.sup) file is accomplished using \"first\" and \"last\" timestamps as anchor-points.\n");
     fprintf (stdout, "  Choose \"first\" and \"last\" subtitles that are near or at beginning and end of the feature in order to maximize scaling accuracy.\n");
     fprintf (stdout, "  Use pgs to produce bitmaps (which have timestamp filenames) or use SubtitleEdit to obtain the existing subtitle timestamps.\n");
@@ -87,104 +85,77 @@ main (int argc, char **argv) {
     return (EXIT_SUCCESS);
   }
 
-  // Allocate memory for various arrays.
   temp = allocate_strmem (MAX_STRINGLEN);
   timestamp = allocate_strmem (MAX_STRINGLEN);
   options.change = allocate_changemem (MAX_CHANGES);
   palette = allocate_pdsmem (MAX_PALETTES);
-  for (i = 0; i < MAX_PALETTES; i++) {
-    palette[i].entry = allocate_palentrymem (MAX_PALETTE_ENTRIES);
-  }
+  for (i = 0; i < MAX_PALETTES; i++) palette[i].entry = allocate_palentrymem (MAX_PALETTE_ENTRIES);
   object = allocate_objmem (MAX_OBJECTS);
-  for (i = 0; i < MAX_OBJECTS; i++) {
-    object->buffer = NULL;  // We will allocate dynamically in parse_ods().
-  }
-  sub.buffer = allocate_u8mem (3840 * 2160 * 4);  // 2160p UHD BluRay video resolution * RGBA
   sync = allocate_syncmem (MAX_SUBS);
 
-  // Initializations.
-  options.nchanges = 0;
-  for (i = 0; i < MAX_OBJECTS; i++) {
-    object[i].buffer = NULL;
-    object[i].length = 0;
-  }
-
-  // Ask for desired timestep offsets, if requested.
-  // All can be zero.
   if (options.offset_flag) {
     fprintf (stdout, "\nOffset values can be positive or negative integers.\n\n");
+
     fprintf (stdout, "What is desired offset hours? ");
-    memset (temp, 0, MAX_STRINGLEN * sizeof (char));
     inputtext (temp);
-    errno = 0;
-    options.offset.h = (int) strtol (temp, &endptr, 10);
-    if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
-      fprintf (stderr, "Cannot make integer of offset hours: %s\n", temp);
-      exit (EXIT_FAILURE);
-    }
+    options.offset.h = parse_integer_input (temp, "offset hours");
 
     fprintf (stdout, "What is desired offset minutes? ");
-    memset (temp, 0, MAX_STRINGLEN * sizeof (char));
     inputtext (temp);
-    errno = 0;
-    options.offset.m = (int) strtol (temp, &endptr, 10);
-    if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
-      fprintf (stderr, "Cannot make integer of offset minutes: %s\n", temp);
-      exit (EXIT_FAILURE);
-    }
+    options.offset.m = parse_integer_input (temp, "offset minutes");
 
     fprintf (stdout, "What is desired offset seconds? ");
-    memset (temp, 0, MAX_STRINGLEN * sizeof (char));
     inputtext (temp);
-    errno = 0;
-    options.offset.s = (int) strtol (temp, &endptr, 10);
-    if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
-      fprintf (stderr, "Cannot make integer of offset seconds: %s\n", temp);
-      exit (EXIT_FAILURE);
-    }
+    options.offset.s = parse_integer_input (temp, "offset seconds");
 
     fprintf (stdout, "What is desired offset milliseconds? ");
-    memset (temp, 0, MAX_STRINGLEN * sizeof (char));
     inputtext (temp);
-    errno = 0;
-    options.offset.ms = (int) strtol (temp, &endptr, 10);
-    if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
-      fprintf (stderr, "Cannot make integer of offset milliseconds: %s\n", temp);
-      exit (EXIT_FAILURE);
-    }
+    options.offset.ms = parse_integer_input (temp, "offset milliseconds");
     fprintf (stdout, "\n");
 
-    // Calculate total milliseconds of offset.
     timetoms (&options.offset);
+    if (options.offset.totalms > INT64_MAX / 90 || options.offset.totalms < INT64_MIN / 90) {
+      fprintf (stderr, "Requested offset is too large to represent in 90-kHz ticks.\n");
+      exit (EXIT_FAILURE);
+    }
+    options.offset_ticks = options.offset.totalms * 90;
+  }
 
-  }  // End if options.offset
-
-  // Open .sup input file.
-  // Memory-map the file rather than loading it into an array.
+  // Open and memory-map .sup input file.
   fi = open (filename, O_RDONLY);
   if (fi == -1) {
     fprintf (stderr, "Unable to open input file %s.\n", filename);
     exit (EXIT_FAILURE);
   }
-  struct stat st;
 
-  // Get file size.
-  if (fstat (fi, &st) == -1) {
-    perror ("fstat() failed.\n");
-    close (fi);
-    exit (EXIT_FAILURE);
+  {
+    struct stat st;
+    if (fstat (fi, &st) == -1) {
+      perror ("fstat() failed");
+      close (fi);
+      exit (EXIT_FAILURE);
+    }
+    if (st.st_size <= 0) {
+      fprintf (stderr, "Input file %s is empty.\n", filename);
+      close (fi);
+      exit (EXIT_FAILURE);
+    }
+    if ((uintmax_t) st.st_size > SIZE_MAX) {
+      fprintf (stderr, "Input file is too large for this platform.\n");
+      close (fi);
+      exit (EXIT_FAILURE);
+    }
+    suplen = (size_t) st.st_size;
   }
-  suplen = st.st_size;
 
-  // Memory-map the .sup file.
   sup = mmap (NULL, suplen, PROT_READ, MAP_PRIVATE, fi, 0);
   if (sup == MAP_FAILED) {
-    perror ("mmap() failed.\n");
+    perror ("mmap() failed");
     close (fi);
     exit (EXIT_FAILURE);
   }
 
-  // Open output (report) file pgs.out.
+  // Open report output.
   fo = fopen ("pgs.out", "r");
   if (fo != NULL) {
     fprintf (stderr, "Output file pgs.out already exists.\n");
@@ -197,150 +168,149 @@ main (int argc, char **argv) {
     exit (EXIT_FAILURE);
   }
 
-  // Ask for current and new start timestamps for anchor points, if resynchronization is requested.
   if (options.sync_flag) {
-
-    // Ask for current timestamp of first PGS subtitle.
     fprintf (stdout, "\nCurrent start timestamp for first PGS subtitle (hh:mm:ss,ms)? ");
     inputtext (timestamp);
     parse_timestamp (timestamp, &time);
     options.oldfirstms = time.totalms;
 
-    // Ask for current timestamp of last PGS subtitle.
     fprintf (stdout, "Current start timestamp for last PGS subtitle (hh:mm:ss,ms)? ");
     inputtext (timestamp);
     parse_timestamp (timestamp, &time);
     options.oldlastms = time.totalms;
 
-    // Ask for new timestamp of first PGS subtitle.
     fprintf (stdout, "New start timestamp for first PGS subtitle (hh:mm:ss,ms)? ");
     inputtext (timestamp);
     parse_timestamp (timestamp, &time);
     options.newfirstms = time.totalms;
 
-    // Ask for new timestamp of last PGS subtitle.
     fprintf (stdout, "New start timestamp for last PGS subtitle (hh:mm:ss,ms)? ");
     inputtext (timestamp);
     parse_timestamp (timestamp, &time);
     options.newlastms = time.totalms;
 
-    if ((options.newlastms - options.newfirstms) <= 0) {
-      fprintf (stderr, "New timestamps: last - first <= 0.\n");
+    if (options.oldlastms <= options.oldfirstms) {
+      fprintf (stderr, "Current timestamps: last must be greater than first.\n");
       exit (EXIT_FAILURE);
     }
+    if (options.newlastms <= options.newfirstms) {
+      fprintf (stderr, "New timestamps: last must be greater than first.\n");
+      exit (EXIT_FAILURE);
+    }
+  }
 
-  }  // End if options.sync
-
-  // Report PGS filename.
   fprintf (fo, "File: %s (%zu bytes)\n\n", filename, suplen);
 
-  // Prescan PGS file to determine subtitle durations, needed for syncing.
-  for (state.prescan = 1; state.prescan >= 0; state.prescan--) {
+  // Only synchronization needs a prescan. Report, bitmap, and offset modes use one pass.
+  npasses = options.sync_flag ? 2 : 1;
+  for (pass = 0; pass < npasses; pass++) {
+    state.prescan = options.sync_flag && pass == 0;
+    index = 0;
+    nsubs = 0;
+    options.nchanges = state.prescan ? options.nchanges : 0;
 
-    index = 0;  // Index of sup file
-    nsubs = 0;  // Count of subtitles
-    state.seq_flag = 0;  // Initially assume not in a sequence of ODSs.
-    head.segment_type = 0;  // Initially set to invalid segment type.
-    state.num_objects = 0;
-    state.object_id = 0;
-    state.prev_object_id = 0;
-    state.subtitle_active = 0;
+    clear_objects (object);
+    clear_palettes (palette);
+    memset (&state, 0, sizeof (state));
+    state.prescan = options.sync_flag && pass == 0;
+    memset (&head, 0, sizeof (head));
+    sub.width = 0;
+    sub.height = 0;
 
-    // Loop through all segments in sup file.
+    PTS_TYPE display_pts_type = PTS_MIDDLE;
+    SYNC *display_sync = NULL;
+
     while (index < suplen) {
+      uint8_t old_num_objects = state.num_objects;
+      uint16_t old_composition_number = state.composition_number;
+      size_t old_palette = state.current_palette;
+      COMPOSITION_OBJECT old_objects[MAX_COMPOSITION_OBJECTS];
+      SYNC *adjust_sync = NULL;
 
+      memcpy (old_objects, state.composition_object, sizeof (old_objects));
       state.pts_type = PTS_MIDDLE;
 
-      // Segment Header
-      parse_header (&state, sup, suplen, &index, &options, &head, &sync[nsubs], fo);
+      parse_header (&state, sup, suplen, &index, &head, fo);
 
       switch (head.segment_type) {
-
-        case 0x14:  // Palette Definition Segment (PDS)
+        case 0x14:  // PDS
           parse_pds (&state, sup, suplen, &index, &head, palette, fo);
           break;
 
-        case 0x15:  // Object Definition Segment (ODS)
-          parse_ods (&state, sup, suplen, &index, &head, palette, object, &sub, fo);
+        case 0x15:  // ODS
+          parse_ods (&state, sup, suplen, &index, &head, object, fo);
           break;
 
-        case 0x16:  // Presentation Composition Segment (PCS); States: 0x00 = Normal, 0x40 = Acquisition, 0x80 = Epoch Start, 0xc0 = Epoch Continue
+        case 0x16: {  // PCS
+          int changed;
+
           parse_pcs (&state, sup, suplen, &index, &head, object, palette, fo);
+          changed = presentation_changed (old_num_objects, old_composition_number,
+                                          old_palette, old_objects, &state);
 
-          // Acquisition or Epoch Start
-          if (state.composition_state == 0x80 || state.composition_state == 0x40) {
-
-            // If a subtitle is currently active, record active subtitle's end timestamp.
+          // Acquisition/Epoch states are explicit presentation boundaries. Use an else-if
+          // chain so such a PCS cannot also be processed a second time as a normal object change.
+          if (state.composition_state != 0) {
             if (state.subtitle_active) {
-              sub.end = state.pts;
-              state.pts_type = PTS_END;
-              sync[nsubs].end.totalms = sub.end.totalms;  // Record end timestamp for sync option, if requested.
+              adjust_sync = &sync[nsubs];
+              record_sub_end (sync, nsubs, &sub, &head);
+              if (!state.prescan && options.makebmp_flag) write_bmp (&sub);
               nsubs++;
 
-              // Create bitmap, if requested.
-              if (!state.prescan && options.makebmp_flag) write_bmp (&sub);
+              if (state.num_objects > 0) {
+                state.pts_type = PTS_END_START;
+                record_sub_start (sync, nsubs, &sub, &head);
+                state.subtitle_active = 1;
+              } else {
+                state.pts_type = PTS_END;
+                state.subtitle_active = 0;
+              }
+            } else if (state.num_objects > 0) {
+              state.pts_type = PTS_START;
+              record_sub_start (sync, nsubs, &sub, &head);
+              state.subtitle_active = 1;
             }
 
-            // Record new subtitle's start timestamp.
-            sub.start = state.pts;
+          } else if (!state.subtitle_active && state.num_objects > 0) {
             state.pts_type = PTS_START;
-            sync[nsubs].start.totalms = sub.start.totalms;  // Record start timestamp for sync option, if requested.
-
-            // Set subtitle_active state to 1 if number of active objects is > 0.
-            state.subtitle_active = (state.num_objects > 0);
-          }
-
-          // Start new subtitle.
-          if (!state.subtitle_active && (state.num_objects > 0)) {
-
-            // Record new subtitle's start timestamp.
-            sub.start = state.pts;
-            state.pts_type = PTS_START;
-            sync[nsubs].start.totalms = sub.start.totalms;  // Record start timestamp for sync option, if requested.
-
+            record_sub_start (sync, nsubs, &sub, &head);
             state.subtitle_active = 1;
 
-          // Object changed; start new subtitle.
-          } else if (state.subtitle_active && (state.num_objects > 0) && (state.object_id != state.prev_object_id)) {
-
-            // Record active subtitle's end timestamp.
-            sub.end = state.pts;
+          } else if (state.subtitle_active && state.num_objects == 0) {
             state.pts_type = PTS_END;
-            sync[nsubs].end.totalms = sub.end.totalms;  // Record end timestamp for sync option, if requested.
-            nsubs++;
-
-            // Create bitmap, if requested.
+            adjust_sync = &sync[nsubs];
+            record_sub_end (sync, nsubs, &sub, &head);
             if (!state.prescan && options.makebmp_flag) write_bmp (&sub);
-
-            // Record new subtitle's start timestamp.
-            sub.start = state.pts;
-            state.pts_type = PTS_START;
-            sync[nsubs].start.totalms = sub.start.totalms;  // Record start timestamp for sync option, if requested.
-
-          // Clear screen.
-          } else if (state.subtitle_active && (state.num_objects == 0)) {
-
-            // Record active subtitle's end timestamp.
-            sub.end = state.pts;
-            state.pts_type = PTS_END;
-            sync[nsubs].end.totalms = sub.end.totalms;  // Record end timestamp for sync option, if requested.
             nsubs++;
-
-            // Create bitmap, if requested.
-            if (!state.prescan && options.makebmp_flag) write_bmp (&sub);
-
             state.subtitle_active = 0;
+
+          } else if (state.subtitle_active && state.num_objects > 0 && changed) {
+            state.pts_type = PTS_END_START;
+            adjust_sync = &sync[nsubs];
+            record_sub_end (sync, nsubs, &sub, &head);
+            if (!state.prescan && options.makebmp_flag) write_bmp (&sub);
+            nsubs++;
+            record_sub_start (sync, nsubs, &sub, &head);
           }
 
-          // Save object_id.
-          state.prev_object_id = state.object_id;
+          // All following functional segments through END belong to this PCS display set.
+          display_pts_type = state.pts_type;
+          display_sync = adjust_sync;
           break;
+        }
 
-        case 0x17:  // Window Definition Segment (WDS)
+        case 0x17:  // WDS
           parse_wds (&state, sup, suplen, &index, &head, fo);
           break;
 
-        case 0x80:  // End of Display Segment (DS)
+        case 0x80:  // END of display set
+          if (head.segment_size != 0) {
+            fprintf (stderr, "END segment has non-zero payload size %zu.\n", head.segment_size);
+            exit (EXIT_FAILURE);
+          }
+          if (!state.prescan && options.makebmp_flag && state.subtitle_active) {
+            render_subtitle (&state, palette, object, &sub);
+          }
           break;
 
         default:
@@ -348,17 +318,35 @@ main (int argc, char **argv) {
           exit (EXIT_FAILURE);
       }
 
+      if (head.segment_type != 0x16) {
+        state.pts_type = display_pts_type;
+        adjust_sync = display_sync;
+      }
+
+      if (!state.prescan && (options.offset_flag || options.sync_flag)) {
+        adjust_timestamps (&state, &head, &options, adjust_sync);
+      }
+
+      if (head.segment_type == 0x80) {
+        display_pts_type = PTS_MIDDLE;
+        display_sync = NULL;
+      }
+
+      if (index != head.segment_end) {
+        fprintf (stderr, "Parser ended at file offset %zu, but current segment ends at %zu.\n",
+                 index, head.segment_end);
+        exit (EXIT_FAILURE);
+      }
+
       if (!state.prescan) fprintf (fo, "\n");
+    }
+  }
 
-    }  // Next segment
-  }  // Next state.prescan
-
-  // Close output file pgs.out.
   fclose (fo);
 
-  if ((options.offset_flag) || (options.sync_flag)) {
+  if (options.offset_flag || options.sync_flag) {
+    uint8_t *revised;
 
-    // Open output file for revised .sup file.
     fo = fopen ("out.sup", "r");
     if (fo != NULL) {
       fprintf (stderr, "Output file out.sup already exists.\n");
@@ -371,43 +359,120 @@ main (int argc, char **argv) {
       exit (EXIT_FAILURE);
     }
 
-    // Write revised .sup file.
-    j = 0;  // Index of change array
-    for (i = 0; i < suplen; i++) {
-      if (i == options.change[j].offset) {
-        fputc (options.change[j].new_value, fo);
-        j++;
-      } else {
-        fputc (sup[i], fo);
+    revised = malloc (suplen);
+    if (revised == NULL) {
+      fprintf (stderr, "Cannot allocate revised .sup output buffer.\n");
+      exit (EXIT_FAILURE);
+    }
+    memcpy (revised, sup, suplen);
+
+    for (i = 0; i < options.nchanges; i++) {
+      if (options.change[i].offset >= suplen) {
+        fprintf (stderr, "Timestamp change offset %zu lies outside the input file.\n", options.change[i].offset);
+        exit (EXIT_FAILURE);
       }
+      revised[options.change[i].offset] = options.change[i].new_value;
     }
 
-    // Close output file.
-    fclose (fo);
-
-  }  // End if options.offset_flag || options.sync_flag
+    if (fwrite (revised, 1, suplen, fo) != suplen) {
+      fprintf (stderr, "Failed while writing out.sup.\n");
+      exit (EXIT_FAILURE);
+    }
+    free (revised);
+    if (fclose (fo) != 0) {
+      fprintf (stderr, "Failed to close out.sup cleanly.\n");
+      exit (EXIT_FAILURE);
+    }
+  }
 
   fprintf (stdout, "\n%zu subtitles found in %s.\n\n", nsubs, filename);
 
-  // Unmap and close .sup input file.
   munmap (sup, suplen);
   close (fi);
 
-  // Free allocated memory.
   free (temp);
   free (filename);
   free (timestamp);
   free (options.change);
-  for (i = 0; i < (size_t) MAX_PALETTES; i++) {
-    free (palette[i].entry);
-  }
+  for (i = 0; i < MAX_PALETTES; i++) free (palette[i].entry);
   free (palette);
-  for (i = 0; i < MAX_OBJECTS; i++) {
-    if (object[i].buffer != NULL) free (object[i].buffer);
-  }
+  clear_objects (object);
   free (object);
   free (sub.buffer);
   free (sync);
 
   return (EXIT_SUCCESS);
+}
+
+static int
+parse_integer_input (const char *text, const char *label) {
+
+  char *endptr;
+  long value;
+
+  errno = 0;
+  value = strtol (text, &endptr, 10);
+  if (errno == ERANGE || endptr == text || *endptr != '\0' || value < INT_MIN || value > INT_MAX) {
+    fprintf (stderr, "Cannot make integer of %s: %s\n", label, text);
+    exit (EXIT_FAILURE);
+  }
+
+  return (int) value;
+}
+
+static void
+copy_filename (char *dest, const char *src) {
+  
+  int n = snprintf (dest, MAX_STRINGLEN, "%s", src);
+  if (n < 0 || n >= MAX_STRINGLEN) {
+    fprintf (stderr, "Input filename is too long; maximum is %d characters.\n", MAX_STRINGLEN - 1);
+    exit (EXIT_FAILURE);
+  } 
+}   
+    
+static int
+presentation_changed (uint8_t old_num_objects, uint16_t old_composition_number, size_t old_palette, const COMPOSITION_OBJECT *old_objects, const STATE *state) {  
+    
+  size_t nbytes;
+
+  if (old_num_objects != state->num_objects) return 1;
+  if (old_composition_number != state->composition_number) return 1;
+  if (old_palette != state->current_palette) return 1;
+  if (state->palette_update_flag) return 1;
+    
+  nbytes = (size_t) state->num_objects * sizeof (COMPOSITION_OBJECT);
+  if (nbytes > 0 && memcmp (old_objects, state->composition_object, nbytes) != 0) return 1;
+    
+  return 0; 
+}   
+    
+static void 
+record_sub_start (SYNC *sync, size_t nsubs, SUB *sub, HEAD *head) {
+    
+  if (nsubs >= MAX_SUBS) {
+    fprintf (stderr, "Exceeded MAX_SUBS while recording subtitle start times.\n");
+    exit (EXIT_FAILURE);
+  } 
+    
+  sub->start = head->pts;
+  sync[nsubs].start = head->pts;
+  sync[nsubs].start_ticks = head->pts_ticks;
+} 
+  
+static void 
+record_sub_end (SYNC *sync, size_t nsubs, SUB *sub, HEAD *head) {
+  
+  if (nsubs >= MAX_SUBS) {
+    fprintf (stderr, "Exceeded MAX_SUBS while recording subtitle end times.\n");
+    exit (EXIT_FAILURE);
+  } 
+    
+  sub->end = head->pts;
+  sync[nsubs].end = head->pts;
+  sync[nsubs].end_ticks = head->pts_ticks; 
+    
+  if (sync[nsubs].end_ticks < sync[nsubs].start_ticks) {
+    fprintf (stderr, "Subtitle %zu has an end timestamp before its start timestamp.\n", nsubs + 1u);
+    exit (EXIT_FAILURE);
+  }
 }

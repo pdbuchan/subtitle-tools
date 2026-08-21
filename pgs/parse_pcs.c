@@ -16,270 +16,200 @@
 
 #include "pgs.h"
 
-// Parse Presentation Composition Segment (PCS)
+static void
+require_pcs_bytes (size_t index, size_t segment_end, size_t nbytes) {
+
+  if (index > segment_end || nbytes > (segment_end - index)) {
+    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
+    exit (EXIT_FAILURE);
+  }
+}
+
+// Parse Presentation Composition Segment (PCS).
 int
 parse_pcs (STATE *state, uint8_t *sup, size_t suplen, size_t *index, HEAD *head, OBJECT *object, PALETTE *palette, FILE *fo) {
 
-  size_t i, offset;
-  uint8_t frame_rate, palette_update_flag, palette_id, crop_flag;
-  uint16_t video_width, video_height, composition_number, object_id, window_id, object_horizontal_position, object_vertical_position;
-  uint16_t object_cropping_horizontal_position, object_cropping_vertical_position, object_cropping_width, object_cropping_height;
+  size_t i;
+  uint8_t frame_rate, palette_id;
+  uint16_t composition_number;
+  double fps;
+
+  (void) suplen;  // parse_header() has already validated head->segment_end against the file size.
 
   if (!state->prescan) fprintf (fo, "\nPresentation Composition Segment (PCS):\n");
 
-  offset = 0;  // Index of this segment
+  require_pcs_bytes (*index, head->segment_end, 11);
 
-  // Video width (2 bytes)
-  if (((*index) + 1) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
+  // Video width (2 bytes).
+  state->video_width = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+  if (!state->prescan) fprintf (fo, "  Video Width (2 bytes): %u px\n", state->video_width);
+  *index += 2;
+
+  // Video height (2 bytes).
+  state->video_height = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+  if (!state->prescan) fprintf (fo, "  Video Height (2 bytes): %u px\n", state->video_height);
+  *index += 2;
+  if (state->video_width == 0 || state->video_height == 0) {
+    fprintf (stderr, "Invalid zero video dimension in parse_pcs().\n");
     exit (EXIT_FAILURE);
   }
-  video_width = (sup[*index] << 8) | sup[(*index) + 1];
-  if (!state->prescan) fprintf (fo, "  Video Width (2 bytes): %u px\n", video_width);
-  (*index) += 2;
-  offset += 2;
 
-  // Video height (2 bytes)
-  if (((*index) + 1) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
+  // Frame Rate (1 byte).
+  frame_rate = sup[*index];
+  fps = framerates (frame_rate);
+  if (!state->prescan) {
+    if (fps > 0.0) {
+      fprintf (fo, "  Framerate ID (1 byte): 0x%02x (indicates %.3f fps)\n", frame_rate, fps);
+    } else {
+      fprintf (fo, "  Framerate ID (1 byte): 0x%02x (unknown/reserved)\n", frame_rate);
+    }
   }
-  video_height = (sup[*index] << 8) | sup[(*index) + 1];
-  if (!state->prescan) fprintf (fo, "  Video Height (2 bytes): %u px\n", video_height);
-  (*index) += 2;
-  offset += 2;
-
-  // Frame Rate (1 byte)
-  if ((*index) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  frame_rate = sup[(*index)];
-  if (!state->prescan) fprintf (fo, "  Framerate ID (1 byte): 0x%02x (indicates %.3lf fps)\n", frame_rate, framerates (frame_rate));
   (*index)++;
-  offset++;
 
-  // Composition Number (2 bytes)
-  if (((*index) + 1) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  composition_number = (sup[*index] << 8) | sup[(*index) + 1];
+  // Composition Number (2 bytes).
+  composition_number = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+  state->composition_number = composition_number;
   if (!state->prescan) fprintf (fo, "  Composition Number (2 bytes): %u (0x%04x)\n", composition_number, composition_number);
-  (*index) += 2;
-  offset += 2;
+  *index += 2;
 
-  // Composition State (1 byte)
-  if ((*index) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  state->composition_state = sup[(*index)];
+  // Composition State (1 byte).
+  state->composition_state = sup[*index];
   switch (state->composition_state) {
-
-    case 0x00:  // Normal
-      if (!state->prescan) fprintf (fo, "  Composition State (1 byte): 0x%02x = Normal\n", state->composition_state);
+    case 0x00:
+      if (!state->prescan) fprintf (fo, "  Composition State (1 byte): 0x00 = Normal\n");
       break;
-
-    case 0x40:  // Acquisition Point
-      if (!state->prescan) fprintf (fo, "  Composition State (1 byte): 0x%02x = Acquisition\n", state->composition_state);
-
-      // Clear palettes.
+    case 0x40:
+      if (!state->prescan) fprintf (fo, "  Composition State (1 byte): 0x40 = Acquisition\n");
       clear_palettes (palette);
-      break;
-
-    case 0x80:  // Epoch Start
-      if (!state->prescan) fprintf (fo, "  Composition State (1 byte): 0x%02x = Epoch Start\n", state->composition_state);
-
-      // Clear palettes.
-      clear_palettes (palette);
-
-      // Clear objects.
       clear_objects (object);
       break;
-
-    case 0xc0:  // Epoch Continue
-      if (!state->prescan) fprintf (fo, "  Composition State (1 byte): 0x%02x = Epoch Continue\n", state->composition_state);
+    case 0x80:
+      if (!state->prescan) fprintf (fo, "  Composition State (1 byte): 0x80 = Epoch Start\n");
+      clear_palettes (palette);
+      clear_objects (object);
       break;
-
+    case 0xc0:
+      if (!state->prescan) fprintf (fo, "  Composition State (1 byte): 0xc0 = Epoch Continue\n");
+      clear_palettes (palette);
+      clear_objects (object);
+      break;
     default:
       fprintf (stderr, "Unknown Composition State value: 0x%02x\n", state->composition_state);
       exit (EXIT_FAILURE);
-
-  }  // End switch
-  (*index)++;
-  offset++;
-
-  // Palette Update Flag (1 byte)
-  if ((*index) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  palette_update_flag = sup[*index] & 0x80;
-  state->palette_update_flag = palette_update_flag ? 1 : 0;
-  if (!state->palette_update_flag) {
-    if (!state->prescan) fprintf (fo, "  Palette Update Flag (1 byte): 0x%02x = False\n", palette_update_flag);   
-  } else {
-    if (!state->prescan) fprintf (fo, "  Palette Update Flag (1 byte): 0x%02x = True\n", palette_update_flag);
   }
   (*index)++;
-  offset++;
 
-  // Palette ID (1 byte)
-  if ((*index) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
+  // Palette Update Flag (1 byte). Bit 7 is defined; remaining bits are reserved.
+  if ((sup[*index] & 0x7f) != 0) {
+    fprintf (stderr, "Reserved bits are set in PCS Palette Update Flag byte: 0x%02x\n", sup[*index]);
     exit (EXIT_FAILURE);
   }
-  palette_id = sup[(*index)];
-  if (palette_id > MAX_PALETTES) {
-    fprintf (stderr, "palette_id exceeds MAX_PALETTES in pcs().\n");
+  state->palette_update_flag = (sup[*index] & 0x80) != 0;
+  if (!state->prescan) {
+    fprintf (fo, "  Palette Update Flag (1 byte): 0x%02x = %s\n",
+             sup[*index] & 0x80, state->palette_update_flag ? "True" : "False");
+  }
+  (*index)++;
+
+  // Palette ID (1 byte).
+  palette_id = sup[*index];
+  if (palette_id >= MAX_PALETTES) {
+    fprintf (stderr, "Palette ID 0x%02x is outside the supported PGS epoch range 0-%u in parse_pcs().\n",
+             palette_id, MAX_PALETTES - 1);
     exit (EXIT_FAILURE);
   }
+  state->current_palette = palette_id;
   if (!state->prescan) fprintf (fo, "  Palette ID (1 byte): 0x%02x\n", palette_id);
-  state->current_palette = sup[(*index)];
   (*index)++;
-  offset++;
 
-  // Number of Composition ("Window Information") Objects (1 byte)
-  if ((*index) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
+  // Number of Composition Objects (1 byte).
+  state->num_objects = sup[*index];
+  if (state->num_objects > MAX_COMPOSITION_OBJECTS) {
+    fprintf (stderr, "PCS references %u composition objects; PGS supports at most %u.\n",
+             state->num_objects, MAX_COMPOSITION_OBJECTS);
     exit (EXIT_FAILURE);
   }
-  state->num_objects = sup[(*index)];
-  if (!state->prescan) fprintf (fo, "  Number of Composition (\"Window Information\") Objects (1 byte): %u\n", state->num_objects);
+  if (!state->prescan) {
+    fprintf (fo, "  Number of Composition (\"Window Information\") Objects (1 byte): %u\n", state->num_objects);
+  }
   (*index)++;
-  offset++;
 
-  // Composition ("Window Information") Objects
-  if ((!state->prescan) && (state->num_objects > 0)) fprintf (fo, "  Composition (\"Window Information\") Objects:\n");
+  memset (state->composition_object, 0, sizeof (state->composition_object));
+  if ((!state->prescan) && state->num_objects > 0) fprintf (fo, "  Composition (\"Window Information\") Objects:\n");
+
   for (i = 0; i < (size_t) state->num_objects; i++) {
+    COMPOSITION_OBJECT *ref = &state->composition_object[i];
 
-    // Object ID (2 bytes)
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    object_id = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "    Object ID (2 bytes): 0x%04x\n", object_id);
-    if (i == 0) state->object_id = object_id;  // Save first object_id.
-    (*index) += 2;
-    offset += 2;
+    require_pcs_bytes (*index, head->segment_end, 8);
 
-    // Window ID (1 byte)
-    if ((*index) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    window_id = sup[(*index)];
-    if (!state->prescan) fprintf (fo, "      Window ID (1 byte): 0x%02x\n", window_id);
+    ref->object_id = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+    if (!state->prescan) fprintf (fo, "    Object ID (2 bytes): 0x%04x\n", ref->object_id);
+    *index += 2;
+
+    ref->window_id = sup[*index];
+    if (!state->prescan) fprintf (fo, "      Window ID (1 byte): 0x%02x\n", ref->window_id);
     (*index)++;
-    offset++;
 
-    // Object Cropped Flag (1 byte)
-    if ((*index) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
+    ref->composition_flag = sup[*index];
+    if ((ref->composition_flag & 0x3f) != 0) {
+      fprintf (stderr, "Reserved bits are set in PCS composition flag: 0x%02x\n", ref->composition_flag);
       exit (EXIT_FAILURE);
     }
-    crop_flag = sup[(*index)];
-    switch (crop_flag) {
+    if (!state->prescan) {
+      fprintf (fo, "      Composition Flag (1 byte): 0x%02x", ref->composition_flag);
+      if ((ref->composition_flag & 0xc0) == 0) fprintf (fo, " = Normal");
+      if (ref->composition_flag & 0x80) fprintf (fo, " = Cropped");
+      if (ref->composition_flag & 0x40) fprintf (fo, "%sForced", (ref->composition_flag & 0x80) ? ", " : " = ");
+      fprintf (fo, "\n");
+    }
+    (*index)++;
 
-      case 0:
-        if (!state->prescan) fprintf (fo, "      Object Cropped Flag (1 byte): 0x%02x = Off\n", crop_flag);
-        break;
+    ref->x = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+    if (!state->prescan) fprintf (fo, "      Object Horizontal Position (2 bytes): %u px\n", ref->x);
+    *index += 2;
 
-      case 64:  // 0x40
-        if (!state->prescan) fprintf (fo, "      Object Cropped Flag (1 byte): 0x%02x = Force display of the cropped image object\n", crop_flag);
-        break;
+    ref->y = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+    if (!state->prescan) fprintf (fo, "      Object Vertical Position (2 bytes): %u px\n", ref->y);
+    *index += 2;
 
-      default:
-        fprintf (stderr, "      Unknown Object Cropped Flag value: 0x%02x\n", crop_flag);
+    if (ref->x > state->video_width || ref->y > state->video_height) {
+      fprintf (stderr, "PCS object 0x%04x position (%u,%u) is outside video dimensions %ux%u.\n",
+               ref->object_id, ref->x, ref->y, state->video_width, state->video_height);
+      exit (EXIT_FAILURE);
+    }
+
+    // Cropping information follows when bit 7 is set. Bit 6 independently means forced display.
+    if (ref->composition_flag & 0x80) {
+      require_pcs_bytes (*index, head->segment_end, 8);
+
+      ref->crop_x = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+      if (!state->prescan) fprintf (fo, "      Object Cropping Horizontal Position (2 bytes): %u px\n", ref->crop_x);
+      *index += 2;
+
+      ref->crop_y = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+      if (!state->prescan) fprintf (fo, "      Object Cropping Vertical Position (2 bytes): %u px\n", ref->crop_y);
+      *index += 2;
+
+      ref->crop_width = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+      if (!state->prescan) fprintf (fo, "      Object Cropping Width (2 bytes): %u px\n", ref->crop_width);
+      *index += 2;
+
+      ref->crop_height = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+      if (!state->prescan) fprintf (fo, "      Object Cropping Height (2 bytes): %u px\n", ref->crop_height);
+      *index += 2;
+
+      if (ref->crop_width == 0 || ref->crop_height == 0) {
+        fprintf (stderr, "PCS object 0x%04x has a zero-sized crop rectangle.\n", ref->object_id);
         exit (EXIT_FAILURE);
-
+      }
     }
-    (*index)++;
-    offset++;
+  }
 
-    // Object Horizontal Position (2 bytes)
-    // X offset from the top-left pixel of the image on the screen
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    object_horizontal_position = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Object Horizontal Position (2 bytes): %u px\n", object_horizontal_position);
-    (*index) += 2;
-    offset += 2;
-
-    // Object Vertical Position (2 bytes)
-    // Y offset from the top-left pixel of the image on the screen
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    object_vertical_position = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Object Vertical Position (2 bytes): %u px\n", object_vertical_position);
-    (*index) += 2;
-    offset += 2;
-
-    // No cropping for current object.
-    if (crop_flag == 0) {
-      continue;
-    }
-
-    if ((offset + 8) > head->segment_size) {
-      fprintf (stderr, "Not enough bytes in segment for cropping data in pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-
-    // Object Cropping Horizontal Position (2 bytes)
-    // X offset from the top left pixel of the cropped object in the
-    // screen. Only used when the Object Cropped Flag is set to 0x40.
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    object_cropping_horizontal_position = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Object Cropping Horizontal Position (2 bytes): %u px\n", object_cropping_horizontal_position);
-    (*index) += 2;
-    offset += 2;
-
-    // Object Cropping Vertical Position (2 bytes)
-    // Y offset from the top left pixel of the cropped object in the
-    // screen. Only used when the Object Cropped Flag is set to 0x40.
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    object_cropping_vertical_position = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Object Cropping Vertical Position (2 bytes): %u px\n", object_cropping_vertical_position);
-    (*index) += 2;
-    offset += 2;
-
-    // Object Cropping Width (2 bytes)
-    // Width of the cropped object in the screen. Only used when the
-    // Object Cropped Flag is set to 0x40.
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    object_cropping_width = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Object Cropping Width (2 bytes): %u px\n", object_cropping_width);
-    (*index) += 2;
-    offset += 2;
-
-    // Object Cropping Height (2 bytes)
-    // Height of the cropped object in the screen. Only used when the
-    // Object Cropped Flag is set to 0x40.
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    object_cropping_height = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Object Cropping Height (2 bytes): %u px\n", object_cropping_height);
-    (*index) += 2;
-    offset += 2;
-
-  }  // Next Compositional Object
+  if (*index != head->segment_end) {
+    fprintf (stderr, "PCS parser consumed %zu bytes but segment ends at file offset %zu.\n",
+             *index, head->segment_end);
+    exit (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }

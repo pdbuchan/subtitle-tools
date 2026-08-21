@@ -16,12 +16,17 @@
 
 #include "pgs.h"
 
-// Record uint32_t change to change array.
+// Record a big-endian uint32_t change in the change array.
 void
 record_u32_change (OPTIONS *options, size_t index, uint32_t value) {
 
-  options->change[options->nchanges++] = (CHANGE) {index,     (value >> 24) & 0xff};
-  options->change[options->nchanges++] = (CHANGE) {index + 1, (value >> 16) & 0xff};
-  options->change[options->nchanges++] = (CHANGE) {index + 2, (value >> 8)  & 0xff};
-  options->change[options->nchanges++] = (CHANGE) {index + 3, value & 0xff};
+  if (options->nchanges > MAX_CHANGES - 4u) {
+    fprintf (stderr, "Exceeded MAX_CHANGES while recording timestamp revisions.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  options->change[options->nchanges++] = (CHANGE) {index,     (uint8_t) ((value >> 24) & 0xffu)};
+  options->change[options->nchanges++] = (CHANGE) {index + 1, (uint8_t) ((value >> 16) & 0xffu)};
+  options->change[options->nchanges++] = (CHANGE) {index + 2, (uint8_t) ((value >> 8)  & 0xffu)};
+  options->change[options->nchanges++] = (CHANGE) {index + 3, (uint8_t) (value & 0xffu)};
 }

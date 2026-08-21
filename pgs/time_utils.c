@@ -20,30 +20,27 @@
 int
 timetoms (TIME *time) {
 
-  time->totalms =  (int64_t) (time->h * 60 * 60 * 1000);
-  time->totalms += (int64_t) (time->m * 60 * 1000);
-  time->totalms += (int64_t) (time->s * 1000);
+  time->totalms = (int64_t) time->h * 60 * 60 * 1000;
+  time->totalms += (int64_t) time->m * 60 * 1000;
+  time->totalms += (int64_t) time->s * 1000;
   time->totalms += (int64_t) time->ms;
 
   return (EXIT_SUCCESS);
 }
 
-// Calculate h, m, s, ms from totalms in TIME struct.
+// Calculate h, m, s, ms from a non-negative totalms value.
 int
 mstotime (TIME *time) {
 
-  int64_t totalms;
-    
-  totalms = time->totalms;
-    
-  time->h = (int) (totalms / (1000 * 60 * 60));
-  totalms %= (1000 * 60 * 60);
- 
-  time->m = (int) (totalms / (1000 * 60));
-  totalms %= (1000 * 60);
-  
-  time->s = (int) (totalms / 1000);
+  int64_t totalms = time->totalms;
 
+  if (totalms < 0) totalms = 0;
+
+  time->h = (int) (totalms / (INT64_C (1000) * 60 * 60));
+  totalms %= (INT64_C (1000) * 60 * 60);
+  time->m = (int) (totalms / (INT64_C (1000) * 60));
+  totalms %= (INT64_C (1000) * 60);
+  time->s = (int) (totalms / 1000);
   time->ms = (int) (totalms % 1000);
 
   return (EXIT_SUCCESS);

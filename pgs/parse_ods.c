@@ -16,157 +16,159 @@
 
 #include "pgs.h"
 
-// Parse Object Definition Segment (ODS)
-int
-parse_ods (STATE *state, uint8_t *sup, size_t suplen, size_t *index, HEAD *head, PALETTE *palette, OBJECT *object, SUB *sub, FILE *fo) {
+static void
+require_ods_bytes (size_t index, size_t segment_end, size_t nbytes) {
 
-  size_t i, segment_end_index;
-  uint8_t object_version_number, seq_flag, seq;
-  uint32_t object_length;
-  void *tmp;
+  if (index > segment_end || nbytes > (segment_end - index)) {
+    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
+    exit (EXIT_FAILURE);
+  }
+}
+
+// Parse Object Definition Segment (ODS).
+int
+parse_ods (STATE *state, uint8_t *sup, size_t suplen, size_t *index, HEAD *head, OBJECT *object, FILE *fo) {
+
+  OBJECT *obj;
+  size_t fragment_len, pixel_count;
+  uint16_t object_id;
+  uint8_t version, sequence_desc, sequence;
+
+  (void) suplen;
 
   if (!state->prescan) fprintf (fo, "\nObject Definition Segment (ODS):\n");
 
-  segment_end_index = (*index) + head->segment_size;
+  // Every fragment has Object ID, version, and sequence descriptor.
+  require_ods_bytes (*index, head->segment_end, 4);
 
-  // Object ID (2 bytes)
-  if (((*index) + 1) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  state->object_id = (sup[*index] << 8) | sup[(*index) + 1];
-  if (!state->prescan) fprintf (fo, "  Object ID (2 bytes): 0x%04x\n", state->object_id);
-  (*index) += 2;
+  object_id = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+  if (!state->prescan) fprintf (fo, "  Object ID (2 bytes): 0x%04x\n", object_id);
+  *index += 2;
 
-  // Allocate memory for RLE-encoded data buffer if not currently allocated for this object ID.
-  if (object[state->object_id].buffer == NULL) {
-    tmp = (uint8_t *) malloc (MAX_OBJECT_BUFFER_LEN * sizeof (uint8_t));
-    if (tmp != NULL) {
-      memset (tmp, 0, MAX_OBJECT_BUFFER_LEN * sizeof (uint8_t));
-      object[state->object_id].buffer = tmp;
-    } else {
-      fprintf (stderr, "ERROR: Cannot allocate memory for object[state->object_id].buffer in ods().\n");
-      exit (EXIT_FAILURE);
-    }
-    object[state->object_id].length = 0;
-  }
-
-  // Object Version Number (1 byte)
-  if ((*index) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  object_version_number = sup[(*index)];
-  if (!state->prescan) fprintf (fo, "  Object Version Number (1 byte): 0x%02x\n", object_version_number);
+  version = sup[*index];
+  if (!state->prescan) fprintf (fo, "  Object Version Number (1 byte): 0x%02x\n", version);
   (*index)++;
 
-  // Last in Sequence Flag (1 byte)
-  // US20090185789A1: In some cases, it isn't possible to store the decompressed graphics that
-  // constitutes a subtitle into one ODS due to payload contraints of a PES packet.
-  // In such cases, the graphics is split into a series of consecutive fragments.
-  if ((*index) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
+  sequence_desc = sup[*index];
+  if ((sequence_desc & 0x3f) != 0) {
+    fprintf (stderr, "Reserved bits are set in ODS sequence descriptor 0x%02x.\n", sequence_desc);
     exit (EXIT_FAILURE);
   }
-  seq_flag = sup[(*index)];
-  seq = seq_flag & 0xc0;
-  switch (seq) {
-
-    case 64:  // 0x40 = Last in sequence
-      state->seq_flag = 0;  // This is the last in a series of ODSs for one subtitle.
-      if (!state->prescan) fprintf (fo, "  Last in Sequence Flag (1 byte): 0x40 = Last in sequence\n");
-      break;
-
-    case 128:  // 0x80 = First in sequence
-      state->seq_flag = 1;  // We're now in a sequence of ODSs for one subtitle.
-      if (!state->prescan) fprintf (fo, "  Last in Sequence Flag (1 byte): 0x80 = First in sequence\n");
-
-      // Clear buffer for this new object.
-      object[state->object_id].length = 0;
-      memset (object[state->object_id].buffer, 0, MAX_OBJECT_BUFFER_LEN * sizeof (uint8_t));
-      break;
-
-    case 192:  // 0xc0 = First and last in sequence (0x40 | 0x80)
-      state->seq_flag = 0;  // This is the only ODS for this subtitle.
-      if (!state->prescan) fprintf (fo, "  Last in Sequence Flag (1 byte): 0xc0 = First and last in sequence\n");
-
-      // Clear buffer for this new object.
-      object[state->object_id].length = 0;
-      memset (object[state->object_id].buffer, 0, MAX_OBJECT_BUFFER_LEN * sizeof (uint8_t));
-      break;
-
-    case 0x00:  // Continuation of sequence; more ODS segments will follow.
-      if (!state->prescan) fprintf (fo, "  Last in Sequence Flag (1 byte): 0x%02x = Continuation of sequence\n", seq_flag);
-      break;
-
-    default:
-      fprintf(stderr, "Invalid ODS sequence flag: 0x%02x in ods().\n", seq_flag);
-      exit (EXIT_FAILURE);
-      break;
-
+  sequence = sequence_desc & 0xc0;
+  if (!state->prescan) {
+    switch (sequence) {
+      case 0x00: fprintf (fo, "  Sequence Descriptor (1 byte): 0x00 = Continuation\n"); break;
+      case 0x40: fprintf (fo, "  Sequence Descriptor (1 byte): 0x40 = Last in sequence\n"); break;
+      case 0x80: fprintf (fo, "  Sequence Descriptor (1 byte): 0x80 = First in sequence\n"); break;
+      case 0xc0: fprintf (fo, "  Sequence Descriptor (1 byte): 0xc0 = First and last in sequence\n"); break;
+      default: break;
+    }
   }
   (*index)++;
 
-  // Object Data Length (3 bytes)
-  // The length of the run-length encoding (RLE) data in the current segment.
-  // Include width and height fields (4 bytes) if (seq_flag == 0x80) || (seq_flag == 0xc0).
-  if (((*index) + 2) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  object_length = (sup[*index] << 16) | (sup[(*index) + 1] << 8) | sup[(*index) + 2];
-  (*index) += 3;
-  if (object_length < 4) {
-    fprintf (stderr, "Invalid ODS object length: %u in ods().\n", object_length);
-    exit (EXIT_FAILURE);
-  }
-  if (((*index) + object_length) > segment_end_index) {
-    fprintf (stderr, "ODS object length exceeds segment size in ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  if (!state->prescan) fprintf (fo, "  Object Data Length for this segment (3 bytes): %u bytes\n", object_length);
+  obj = &object[object_id];
 
-  // Width and Height fields appear only in the first ODS of a sequence.
-  if ((seq_flag == 0x80) || (seq_flag == 0xc0)) {
+  if (sequence & 0x80) {
+    uint32_t declared_length;
+    void *tmp;
 
-    // Width of the image (2 bytes)
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
+    // A first fragment additionally contains Object Data Length and object dimensions.
+    require_ods_bytes (*index, head->segment_end, 7);
+
+    declared_length = ((uint32_t) sup[*index] << 16) |
+                      ((uint32_t) sup[*index + 1] << 8) |
+                      (uint32_t) sup[*index + 2];
+    *index += 3;
+    if (declared_length < 4) {
+      fprintf (stderr, "Invalid ODS Object Data Length %u; it must include four dimension bytes.\n", declared_length);
       exit (EXIT_FAILURE);
     }
-    sub->width = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "  Width of the image (2 bytes): %zu px\n", sub->width);
-    (*index) += 2;
 
-    // Height of the image (2 bytes)
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
+    obj->width = ((size_t) sup[*index] << 8) | sup[*index + 1];
+    *index += 2;
+    obj->height = ((size_t) sup[*index] << 8) | sup[*index + 1];
+    *index += 2;
+    obj->version = version;
+    obj->expected_length = (size_t) declared_length - 4u;
+    obj->remaining_length = obj->expected_length;
+    obj->length = 0;
+    obj->complete = 0;
+
+    if (!state->prescan) {
+      fprintf (fo, "  Object Data Length (3 bytes): %u bytes (includes width and height)\n", declared_length);
+      fprintf (fo, "  Width of the image (2 bytes): %zu px\n", obj->width);
+      fprintf (fo, "  Height of the image (2 bytes): %zu px\n", obj->height);
+    }
+
+    if (obj->width == 0 || obj->height == 0 || obj->width > SIZE_MAX / obj->height) {
+      fprintf (stderr, "Invalid ODS object dimensions %zux%zu.\n", obj->width, obj->height);
       exit (EXIT_FAILURE);
     }
-    sub->height = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "  Height of the image (2 bytes): %zu px\n", sub->height);
-    (*index) += 2;
+    if (state->video_width != 0 && state->video_height != 0 &&
+        (obj->width > state->video_width || obj->height > state->video_height)) {
+      fprintf (stderr, "ODS object dimensions %zux%zu exceed video dimensions %ux%u.\n",
+               obj->width, obj->height, state->video_width, state->video_height);
+      exit (EXIT_FAILURE);
+    }
 
-    object_length -= 4;  // Subtract Width and Height field lengths (2 bytes each)
+    free (obj->buffer);
+    obj->buffer = NULL;
+    free (obj->pixels);
+    obj->pixels = NULL;
+
+    if (obj->expected_length > 0) {
+      tmp = malloc (obj->expected_length);
+      if (tmp == NULL) {
+        fprintf (stderr, "Cannot allocate %zu bytes for ODS object 0x%04x.\n", obj->expected_length, object_id);
+        exit (EXIT_FAILURE);
+      }
+      obj->buffer = tmp;
+    }
+
+  } else {
+    // Continuation fragments do not repeat Object Data Length or dimensions.
+    if (obj->buffer == NULL || obj->expected_length == 0 || obj->remaining_length == 0) {
+      fprintf (stderr, "ODS continuation for object 0x%04x has no incomplete first fragment.\n", object_id);
+      exit (EXIT_FAILURE);
+    }
+    if (obj->version != version) {
+      fprintf (stderr, "ODS continuation version 0x%02x does not match first-fragment version 0x%02x for object 0x%04x.\n",
+               version, obj->version, object_id);
+      exit (EXIT_FAILURE);
+    }
   }
 
-  // Append RLE-compressed object data to object buffer.
-  if (object[state->object_id].length + object_length > MAX_OBJECT_BUFFER_LEN) {
-    fprintf (stderr, "RLE object buffer overflow for object 0x%04x in ods().\n", state->object_id);
+  fragment_len = head->segment_end - *index;
+  if (fragment_len > obj->remaining_length) {
+    fprintf (stderr, "ODS fragment contains %zu RLE bytes but object 0x%04x has only %zu bytes remaining.\n",
+             fragment_len, object_id, obj->remaining_length);
     exit (EXIT_FAILURE);
   }
-  for (i = 0; i < (size_t) object_length; i++) {
-    object[state->object_id].buffer[object[state->object_id].length] = sup[(*index) + i];
-    object[state->object_id].length++;
-  }
 
-  // Decode RLE-compressed object data if: last in sequence, or first and last in sequence.
-  // Decode image by uncompressing to red, green, blue, and alpha (RGBA) per pixel, and saving in current subtitle's image buffer.
-  if ((seq_flag == 0x40) || (seq_flag == 0xc0)) {
-    decode_rle (state, palette, object[state->object_id].buffer, (size_t) object[state->object_id].length, sub->buffer);
-  }
+  if (fragment_len > 0) memcpy (obj->buffer + obj->length, sup + *index, fragment_len);
+  obj->length += fragment_len;
+  obj->remaining_length -= fragment_len;
+  *index = head->segment_end;
 
-  (*index) += object_length;
+  if ((sequence & 0x40) != 0) {
+    if (obj->remaining_length != 0) {
+      fprintf (stderr, "Last ODS fragment for object 0x%04x is %zu RLE bytes shorter than declared.\n",
+               object_id, obj->remaining_length);
+      exit (EXIT_FAILURE);
+    }
+
+    pixel_count = obj->width * obj->height;
+    obj->pixels = malloc (pixel_count);
+    if (obj->pixels == NULL) {
+      fprintf (stderr, "Cannot allocate %zu decoded pixels for object 0x%04x.\n", pixel_count, object_id);
+      exit (EXIT_FAILURE);
+    }
+    decode_rle (obj->buffer, obj->length, obj->width, obj->height, obj->pixels);
+    obj->complete = 1;
+  } else if (obj->remaining_length == 0) {
+    fprintf (stderr, "ODS object 0x%04x is complete, but the current fragment is not marked last.\n", object_id);
+    exit (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }

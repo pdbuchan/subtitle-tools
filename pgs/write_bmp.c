@@ -16,27 +16,36 @@
 
 #include "pgs.h"
 
-// Create a bitmap file for an image object.
+// Create a bitmap file for the current rendered subtitle.
 // Filename is start and end timestamps.
 int
 write_bmp (SUB *sub) {
 
   size_t width, height, x, y, flipped_y, row_size, image_size, index;
-  uint8_t r, g, b, a, padding[3] = {0, 0, 0};  // Padding to make each row 4 bytes aligned
-  char *filename;
+  uint8_t r, g, b, a, padding[3] = {0, 0, 0};
+  char filename[MAX_STRINGLEN];
   FILE *fo2;
+  int n;
 
-  // Allocate memory for various arrays.
-  filename = allocate_strmem (MAX_STRINGLEN);
+  width = sub->width;
+  height = sub->height;
+  if (width == 0 || height == 0 || sub->buffer == NULL) {
+    fprintf (stderr, "Cannot write an empty subtitle bitmap.\n");
+    exit (EXIT_FAILURE);
+  }
 
-  sprintf (filename, "%02d_%02d_%02d_%03d__%02d_%02d_%02d_%03d.bmp",
-                     sub->start.h, sub->start.m, sub->start.s, sub->start.ms,
-                     sub->end.h, sub->end.m, sub->end.s, sub->end.ms);
+  n = snprintf (filename, sizeof (filename), "%02d_%02d_%02d_%03d__%02d_%02d_%02d_%03d.bmp",
+                sub->start.h, sub->start.m, sub->start.s, sub->start.ms,
+                sub->end.h, sub->end.m, sub->end.s, sub->end.ms);
+  if (n < 0 || (size_t) n >= sizeof (filename)) {
+    fprintf (stderr, "Bitmap filename is too long in write_bmp().\n");
+    exit (EXIT_FAILURE);
+  }
 
-  // Open output file.
-  fo2 = fopen (filename, "r");
+  fo2 = fopen (filename, "rb");
   if (fo2 != NULL) {
     fprintf (stderr, "Output file %s already exists.\n", filename);
+    fclose (fo2);
     exit (EXIT_FAILURE);
   }
   fo2 = fopen (filename, "wb");
@@ -45,70 +54,74 @@ write_bmp (SUB *sub) {
     exit (EXIT_FAILURE);
   }
 
-  width = sub->width;
-  height = sub->height;
-
-  // Calculate the padding required for each row.
-  row_size = (width * 3 + 3) & (~3);  // Each row must be a multiple of 4 bytes
+  if (width > (SIZE_MAX - 3u) / 3u) {
+    fprintf (stderr, "Bitmap row size overflow in write_bmp().\n");
+    fclose (fo2);
+    exit (EXIT_FAILURE);
+  }
+  row_size = (width * 3u + 3u) & ~(size_t) 3u;
+  if (height > SIZE_MAX / row_size) {
+    fprintf (stderr, "Bitmap image size overflow in write_bmp().\n");
+    fclose (fo2);
+    exit (EXIT_FAILURE);
+  }
   image_size = row_size * height;
+  if (image_size > UINT32_MAX - 54u || width > INT32_MAX || height > INT32_MAX) {
+    fprintf (stderr, "Bitmap is too large for the BMP format used by write_bmp().\n");
+    fclose (fo2);
+    exit (EXIT_FAILURE);
+  }
 
-  // BMP file header
-  write_u16_le (fo2, 0x4d42);           // File type, should be "BM"
-  write_u32_le (fo2, 54 + (uint32_t) image_size);  // Size of the file (bytes)
-  write_u16_le (fo2, 0);                // Reserved (set to 0)
-  write_u16_le (fo2, 0);                // Reserved (set to 0)
-  write_u32_le (fo2, 54);               // Offset (bytes) to the start of the pixel data
+  // BMP file header.
+  write_u16_le (fo2, 0x4d42);
+  write_u32_le (fo2, 54u + (uint32_t) image_size);
+  write_u16_le (fo2, 0);
+  write_u16_le (fo2, 0);
+  write_u32_le (fo2, 54);
 
-  // BMP information header
-  write_u32_le (fo2, 40);               // Size of this header (40 bytes)
-  write_s32_le (fo2, (int32_t) width);   // Width of the image (px)
-  write_s32_le (fo2, (int32_t) height);  // Height of the image (px)
-  write_u16_le (fo2, 1);                // Number of color planes (always 1)
-  write_u16_le (fo2, 24);               // Bits per pixel (24 for RGB)
-  write_u32_le (fo2, 0);                // Compression method (0 for none)
-  write_u32_le (fo2, (uint32_t) image_size);  // Size of the image data (bytes)
-  write_s32_le (fo2, 7874);             // Horizontal resolution (in pixels per meter) (200 DPI)
-  write_s32_le (fo2, 7874);             // Vertical resolution (in pixels per meter) (200 DPI)
-  write_u32_le (fo2, 0);                // Number of colors used (0 for 2^24)
-  write_u32_le (fo2, 0);                // Important colors (0 for all)
+  // BMP information header.
+  write_u32_le (fo2, 40);
+  write_s32_le (fo2, (int32_t) width);
+  write_s32_le (fo2, (int32_t) height);
+  write_u16_le (fo2, 1);
+  write_u16_le (fo2, 24);
+  write_u32_le (fo2, 0);
+  write_u32_le (fo2, (uint32_t) image_size);
+  write_s32_le (fo2, 7874);
+  write_s32_le (fo2, 7874);
+  write_u32_le (fo2, 0);
+  write_u32_le (fo2, 0);
 
-  // Write pixels to bitmap output file.
+  // Write pixels. BMP rows are bottom-up and use BGR order.
   for (y = 0; y < height; y++) {
+    flipped_y = height - 1u - y;
     for (x = 0; x < width; x++) {
+      index = ((flipped_y * width) + x) * 4u;
+      r = sub->buffer[index];
+      g = sub->buffer[index + 1u];
+      b = sub->buffer[index + 2u];
+      a = sub->buffer[index + 3u];
 
-      // Get from buffer the R, G, B, and A values for next pixel.
-      flipped_y = height - 1 - y;
-      index = ((flipped_y * width) + x) * 4;
-      r = sub->buffer[index + 0];  // Red
-      g = sub->buffer[index + 1];  // Green
-      b = sub->buffer[index + 2];  // Blue
-      a = sub->buffer[index + 3];  // Alpha
+      // Composite transparency against black for the 24-bit output bitmap.
+      r = (uint8_t) (((uint16_t) r * a) / 255u);
+      g = (uint8_t) (((uint16_t) g * a) / 255u);
+      b = (uint8_t) (((uint16_t) b * a) / 255u);
 
-      // In a video setting alpha is used to adjust transparency, but here
-      // we apply alpha as darkness: transparent = black, opaque = no change
-      // alpha: 0 = transparent, 255 = opaque
-      r = (uint8_t) ((r * (uint16_t) a) / 255);
-      g = (uint8_t) ((g * (uint16_t) a) / 255);
-      b = (uint8_t) ((b * (uint16_t) a) / 255);
+      fputc (b, fo2);
+      fputc (g, fo2);
+      fputc (r, fo2);
+    }
+    if (fwrite (padding, 1, row_size - width * 3u, fo2) != row_size - width * 3u) {
+      fprintf (stderr, "Failed while writing bitmap %s.\n", filename);
+      fclose (fo2);
+      exit (EXIT_FAILURE);
+    }
+  }
 
-      // Write pixel data to file.
-      // Note that RGB bitmaps are written in order BGR.
-      fputc (b, fo2);  // B
-      fputc (g, fo2);  // G
-      fputc (r, fo2);  // R
-
-    }  // Next column
-
-    // Write padding, if necessary.
-    fwrite (padding, 1, row_size - width * 3, fo2);
-
-  }  // Next row
-
-  // Close output file.
-  fclose (fo2);
-
-  // Free allocated memory.
-  free (filename);
+  if (fclose (fo2) != 0) {
+    fprintf (stderr, "Failed to close bitmap %s cleanly.\n", filename);
+    exit (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }

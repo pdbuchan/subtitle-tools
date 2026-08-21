@@ -16,20 +16,16 @@
 
 #include "pgs.h"
 
-// Clear objects.
+// Clear all cached objects in the current epoch/acquisition.
 int
 clear_objects (OBJECT *object) {
 
   size_t i;
 
   for (i = 0; i < (size_t) MAX_OBJECTS; i++) {
-
-    if (object[i].buffer != NULL) {
-      free(object[i].buffer);
-      object[i].buffer = NULL;
-    }
-
-    object[i].length = 0;
+    free (object[i].buffer);
+    free (object[i].pixels);
+    memset (&object[i], 0, sizeof (object[i]));
   }
 
   return (EXIT_SUCCESS);

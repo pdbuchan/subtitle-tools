@@ -16,9 +16,11 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>  // uint8_t, size_t, etc.
+#include <inttypes.h>  // uint8_t, uint32_t, int64_t, size_t, etc.
+#include <stdint.h>
 #include <string.h>
-#include <math.h>  // pow()
+#include <math.h>  // llround()
+#include <limits.h>
 #include <sys/mman.h>  // mmap(), munmap()
 #include <sys/stat.h>  // fstat()
 #include <fcntl.h>  // open()
@@ -26,15 +28,14 @@
 #include <errno.h>
 
 #define MAX_STRINGLEN 256  // Maximum length of a character string
-#define MAX_NUMLEN 8  // Maximum number of bytes to compose a value
-#define MAX_PALETTES 16  // Maximum number of palettes per epoch
-#define MAX_PALETTE_ENTRIES 256 // Maximum number of palette entries within one palette; must be 256 since one byte is used for ID
-#define MAX_OBJECTS 65536  // Maximum number of image objects
-#define MAX_OBJECT_BUFFER_LEN 8294400  // Worst case of 1 RLE byte per pixel for 4K give 3840 x 2160.
-#define MAX_SUBS 10000  // Assume a maximum of 10,000 subtitles to sync in a PGS .sup file.
-#define MAX_CHANGES 1000000  // Huge; Maximum number of bytes we can change in a .sup file to account for all PTS/DTS changes due to offset or sync option
+#define MAX_PALETTES 8  // Maximum number of palettes per epoch
+#define MAX_PALETTE_ENTRIES 256  // Palette entry IDs are one byte.
+#define MAX_OBJECTS 65536  // Object IDs are two bytes.
+#define MAX_COMPOSITION_OBJECTS 2  // A PGS presentation may reference up to two objects.
+#define MAX_SUBS 10000  // Maximum number of subtitle presentation intervals used for synchronization.
+#define MAX_CHANGES 1000000  // Maximum number of changed bytes in an offset/synchronized .sup file.
 
-// Array of byte changes to original file if we do offset or sync
+// Array of byte changes to original file if we do offset or sync.
 typedef struct {
   size_t offset;  // Index within .sup file of changed byte
   uint8_t new_value;
@@ -48,13 +49,14 @@ typedef struct {
   int64_t totalms;
 } TIME;
 
-// User options
+// User options.
 typedef struct {
   uint8_t makebmp_flag;
   uint8_t offset_flag;
   TIME offset;
+  int64_t offset_ticks;
   uint8_t sync_flag;
-  // "First" and "last" subtitle total ms for resyncronizing subtitles to anchor points:
+  // "First" and "last" subtitle start times for resynchronizing subtitles to anchor points.
   int64_t oldfirstms;
   int64_t oldlastms;
   int64_t newfirstms;
@@ -63,12 +65,17 @@ typedef struct {
   CHANGE *change;
 } OPTIONS;
 
-// Segment header parameters
+// Segment header parameters.
 typedef struct {
   TIME pts;
   TIME dts;
+  uint32_t pts_ticks;
+  uint32_t dts_ticks;
+  size_t pts_offset;
+  size_t dts_offset;
   uint8_t segment_type;  // PDS, ODS, PCS, WDS, or END
   size_t segment_size;
+  size_t segment_end;
 } HEAD;
 
 typedef struct {
@@ -83,60 +90,85 @@ typedef struct {
   PALETTE_ENTRY *entry;
 } PALETTE;
 
-// Undecoded RLE image data to be fed to decode().
+// One decoded PGS object. RLE bytes are retained while a fragmented object is assembled;
+// pixels contains the final decoded 8-bit palette indices.
 typedef struct {
+  uint8_t version;
+  size_t width;
+  size_t height;
   size_t length;
-  uint8_t *buffer;  // Undecoded RLE image data buffer
+  size_t expected_length;
+  size_t remaining_length;
+  uint8_t *buffer;  // RLE-compressed bytes
+  uint8_t *pixels;  // Decoded palette-index image, width * height bytes
+  int complete;
 } OBJECT;
 
-// Subtitle
+// One object reference in a PCS presentation.
+typedef struct {
+  uint16_t object_id;
+  uint8_t window_id;
+  uint8_t composition_flag;  // 0x80 = cropped, 0x40 = forced
+  uint16_t x;
+  uint16_t y;
+  uint16_t crop_x;
+  uint16_t crop_y;
+  uint16_t crop_width;
+  uint16_t crop_height;
+} COMPOSITION_OBJECT;
+
+// Subtitle bitmap snapshot.
 typedef struct {
   TIME start;
   TIME end;
-  size_t height;  // Subtitle height in px
-  size_t width;  // Subtitle width in px
-  uint8_t *buffer;  // Contains decoded image from decode()
+  size_t height;
+  size_t width;
+  size_t buffer_size;
+  uint8_t *buffer;  // RGBA pixels
 } SUB;
 
-// Flag indicating whether current PTS is the subtitle start time, end time, or in the midddle.
-// Used by state.pts_type
+// Flag indicating whether current PTS is a subtitle start time, end time, both, or neither.
 typedef enum {
   PTS_MIDDLE = 0,
   PTS_START,
-  PTS_END
+  PTS_END,
+  PTS_END_START
 } PTS_TYPE;
 
 typedef struct {
-  int prescan;  // Flag to indicate we're pre-analyzing the .sup file to get subtitle durations, needed for sync option.
+  int prescan;  // Pre-analyzing the .sup file to obtain subtitle durations for synchronization.
   int subtitle_active;
   uint8_t num_objects;  // Number of Composition Objects
   uint8_t composition_state;
-  size_t npalettes;
+  uint16_t composition_number;
   uint8_t palette_update_flag;
   size_t current_palette;
-  uint8_t seq_flag;  // Flag indicating ODS sequence: 0 = not in a sequence or in last ODS, 1 = within a sequence
-  uint16_t object_id;
-  uint16_t prev_object_id;
+  uint16_t video_width;
+  uint16_t video_height;
+  COMPOSITION_OBJECT composition_object[MAX_COMPOSITION_OBJECTS];
   TIME pts;
   PTS_TYPE pts_type;
 } STATE;
 
-// Subtitle start and end times; populated by prescanning the .sup file.
+// Subtitle start and end times/ticks; populated by the synchronization prescan.
 typedef struct {
   TIME start;
   TIME end;
+  uint32_t start_ticks;
+  uint32_t end_ticks;
 } SYNC;
 
 // Function Prototypes
 int inputtext (char *);
-int parse_header (STATE *, uint8_t *, size_t, size_t *, OPTIONS *, HEAD *, SYNC *, FILE *);
+int parse_header (STATE *, uint8_t *, size_t, size_t *, HEAD *, FILE *);
 int parse_pcs (STATE *, uint8_t *, size_t, size_t *, HEAD *, OBJECT *, PALETTE *, FILE *);
 int parse_wds (STATE *, uint8_t *, size_t, size_t *, HEAD *, FILE *);
 int parse_pds (STATE *, uint8_t *, size_t, size_t *, HEAD *, PALETTE *, FILE *);
-int parse_ods (STATE *, uint8_t *, size_t, size_t *, HEAD *, PALETTE *, OBJECT *, SUB *, FILE *);
-int decode_rle (STATE *, PALETTE *, uint8_t *, size_t, uint8_t *);
+int parse_ods (STATE *, uint8_t *, size_t, size_t *, HEAD *, OBJECT *, FILE *);
+int decode_rle (uint8_t *, size_t, size_t, size_t, uint8_t *);
+int render_subtitle (STATE *, PALETTE *, OBJECT *, SUB *);
+int adjust_timestamps (STATE *, HEAD *, OPTIONS *, SYNC *);
 int write_bmp (SUB *);
-int rowcol2index (int, int, int, int);
 int parse_timestamp (char *, TIME *);
 int timetoms (TIME *);
 int mstotime (TIME *);
@@ -147,12 +179,10 @@ int clear_objects (OBJECT *);
 void write_u16_le (FILE *, uint16_t);
 void write_u32_le (FILE *, uint32_t);
 void write_s32_le (FILE *, int32_t);
-uint8_t *inttofourbytes (uint8_t *, int32_t);
 void record_u32_change (OPTIONS *, size_t, uint32_t);
-char *allocate_strmem (int);
-uint8_t *allocate_u8mem (int);
-PALETTE_ENTRY *allocate_palentrymem (int);
-PALETTE *allocate_pdsmem (int);
-OBJECT *allocate_objmem (int);
-SYNC *allocate_syncmem (int);
-CHANGE *allocate_changemem (int);
+char *allocate_strmem (size_t);
+PALETTE_ENTRY *allocate_palentrymem (size_t);
+PALETTE *allocate_pdsmem (size_t);
+OBJECT *allocate_objmem (size_t);
+SYNC *allocate_syncmem (size_t);
+CHANGE *allocate_changemem (size_t);

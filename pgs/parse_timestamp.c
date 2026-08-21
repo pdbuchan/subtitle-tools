@@ -15,59 +15,37 @@
 */
 
 #include "pgs.h"
+#include <ctype.h>
 
-// Parse timestamp into TIME struct, and also return total time in milliseconds.
+// Parse a fixed-format hh:mm:ss,mmm timestamp into TIME.
 int
 parse_timestamp (char *timestamp, TIME *time) {
 
-  char xx[3], xxx[4], *endptr;
+  size_t i;
 
-  // Hours
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, timestamp, 2);
-  errno = 0;
-  time->h = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "ERROR: Cannot make integer of hours: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
+  if (strlen (timestamp) != 12 || timestamp[2] != ':' || timestamp[5] != ':' || timestamp[8] != ',') {
+    fprintf (stderr, "Invalid timestamp '%s'. Expected hh:mm:ss,mmm.\n", timestamp);
     exit (EXIT_FAILURE);
   }
 
-  // Minutes
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, &timestamp[3], 2);
-  errno = 0;
-  time->m = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "ERROR: Cannot make integer of minutes: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
+  for (i = 0; i < 12; i++) {
+    if (i == 2 || i == 5 || i == 8) continue;
+    if (!isdigit ((unsigned char) timestamp[i])) {
+      fprintf (stderr, "Invalid timestamp '%s'. Expected decimal digits in hh:mm:ss,mmm.\n", timestamp);
+      exit (EXIT_FAILURE);
+    }
+  }
+
+  time->h = (timestamp[0] - '0') * 10 + (timestamp[1] - '0');
+  time->m = (timestamp[3] - '0') * 10 + (timestamp[4] - '0');
+  time->s = (timestamp[6] - '0') * 10 + (timestamp[7] - '0');
+  time->ms = (timestamp[9] - '0') * 100 + (timestamp[10] - '0') * 10 + (timestamp[11] - '0');
+
+  if (time->m > 59 || time->s > 59) {
+    fprintf (stderr, "Invalid timestamp '%s': minutes and seconds must be between 00 and 59.\n", timestamp);
     exit (EXIT_FAILURE);
   }
 
-  // Seconds
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, &timestamp[6], 2);
-  errno = 0;
-  time->s = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "ERROR: Cannot make integer of seconds: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
-    exit (EXIT_FAILURE);
-  }
-
-  // Milliseconds
-  memset (xxx, 0, 4 * sizeof (char));
-  strncpy (xxx, &timestamp[9], 3);
-  errno = 0;
-  time->ms = (int) strtol (xxx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xxx)) {
-    fprintf (stderr, "ERROR: Cannot make integer of milliseconds: %s\n", xxx);
-    fprintf (stderr, "       %s\n", timestamp);
-    exit (EXIT_FAILURE);
-  }
-
-  // Total milliseconds.
   timetoms (time);
-
   return (EXIT_SUCCESS);
 }

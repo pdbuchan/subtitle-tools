@@ -16,75 +16,72 @@
 
 #include "pgs.h"
 
-// Parse Window Definition Segment (WDS)
+// Parse Window Definition Segment (WDS).
 int
 parse_wds (STATE *state, uint8_t *sup, size_t suplen, size_t *index, HEAD *head, FILE *fo) {
 
-  size_t i;
+  size_t i, expected_size;
   uint8_t nwin;
-  uint16_t window_horizontal_position, window_vertical_position, window_width, window_height;
+  uint16_t x, y, width, height;
+
+  (void) suplen;
 
   if (!state->prescan) fprintf (fo, "\nWindow Definition Segment (WDS):\n");
 
-  // Number of Windows (1 byte)
-  if ((*index) >= suplen) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_wds().\n");
+  if (*index >= head->segment_end) {
+    fprintf (stderr, "WDS is too short in parse_wds().\n");
     exit (EXIT_FAILURE);
   }
-  nwin = sup[(*index)];
+
+  nwin = sup[*index];
   if (!state->prescan) fprintf (fo, "  Number of windows defined in this segment (1 byte): %u\n", nwin);
   (*index)++;
 
-  // Loop through window definitions.
-  for (i = 0; i < (size_t) nwin; i++) {
+  expected_size = 1u + ((size_t) nwin * 9u);
+  if (expected_size != head->segment_size) {
+    fprintf (stderr, "WDS declares %u windows but its segment size is %zu bytes; expected %zu.\n",
+             nwin, head->segment_size, expected_size);
+    exit (EXIT_FAILURE);
+  }
 
-    // Window ID (1 byte)
-    if ((*index) >= suplen) {
+  for (i = 0; i < (size_t) nwin; i++) {
+    uint8_t window_id;
+
+    if ((head->segment_end - *index) < 9) {
       fprintf (stderr, "Unexpectedly reached end of segment in parse_wds().\n");
       exit (EXIT_FAILURE);
     }
-    if (!state->prescan) fprintf (fo, "    Window ID (1 byte): 0x%02x\n", sup[(*index)]);
+
+    window_id = sup[*index];
+    if (!state->prescan) fprintf (fo, "    Window ID (1 byte): 0x%02x\n", window_id);
     (*index)++;
 
-    // Window Horizontal Position (2 bytes)
-    // X offset from the top left pixel of the window in the screen.
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_wds().\n");
+    x = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+    if (!state->prescan) fprintf (fo, "      Window Horizontal Position (2 bytes): %u px\n", x);
+    *index += 2;
+
+    y = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+    if (!state->prescan) fprintf (fo, "      Window Vertical Position (2 bytes): %u px\n", y);
+    *index += 2;
+
+    width = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+    if (!state->prescan) fprintf (fo, "      Window Width (2 bytes): %u px\n", width);
+    *index += 2;
+
+    height = (uint16_t) (((uint16_t) sup[*index] << 8) | (uint16_t) sup[*index + 1]);
+    if (!state->prescan) fprintf (fo, "      Window Height (2 bytes): %u px\n", height);
+    *index += 2;
+
+    if (width == 0 || height == 0) {
+      fprintf (stderr, "Window 0x%02x has a zero dimension in parse_wds().\n", window_id);
       exit (EXIT_FAILURE);
     }
-    window_horizontal_position = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Window Horizontal Position (2 bytes): %u px\n", window_horizontal_position);
-    (*index) += 2;
+  }
 
-    // Window Vertical Position (2 bytes)
-    // Y offset from the top left pixel of the window in the screen.
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_wds().\n");
-      exit (EXIT_FAILURE);
-    }
-    window_vertical_position = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Window Vertical Position (2 bytes): %u px\n", window_vertical_position);
-    (*index) += 2;
-
-    // Window Width (2 bytes)
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_wds().\n");
-      exit (EXIT_FAILURE);
-    }
-    window_width = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Window Width (2 bytes): %u px\n", window_width);
-    (*index) += 2;
-
-    // Window Height (2 bytes)
-    if (((*index) + 1) >= suplen) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_wds().\n");
-      exit (EXIT_FAILURE);
-    }
-    window_height = (sup[*index] << 8) | sup[(*index) + 1];
-    if (!state->prescan) fprintf (fo, "      Window Height (2 bytes): %u px\n", window_height);
-    (*index) += 2;
-
-  }  // Next window definition
+  if (*index != head->segment_end) {
+    fprintf (stderr, "WDS parser did not finish at the end of the segment.\n");
+    exit (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }
