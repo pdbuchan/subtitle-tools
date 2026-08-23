@@ -1,4 +1,4 @@
-/*  Copyright (C) 2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2025-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -23,243 +23,212 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>  // uint8_t
+#include <stdint.h>
 #include <string.h>
 #include <errno.h>
 
 // Definition of structs
 typedef struct {
-  int len;
-  char *name;
-  uint8_t *sequence;
+  size_t len;
+  const char *name;
+  const uint8_t *sequence;
 } BOM;
 
 // Function prototypes
-int byteordermark (uint8_t *, BOM *);
-char *allocate_strmem (int);
-uint8_t *allocate_ustrmem (int);
-BOM *allocate_bommem (int);
+int byteordermark (const uint8_t *, size_t, const BOM *);
+int copyfile (FILE *, FILE *);
 
 // Set some symbolic constants.
-#define MAXLEN 256  // Maximum number of characters per line
-#define MAXLINES 10  // Maximum number of lines of text per subtitle
 #define MAXBOM 11  // Maximum number of Byte Order Mark (BOM) types
+#define BOMMAX 4   // Maximum number of bytes in a supported BOM
+#define COPYLEN 8192  // Size of buffer used while copying the file
 
 int
 main (int argc, char **argv) {
 
-  int i, type, nbytes;
-  char *filename, *temp;
-  uint8_t *input;
-  BOM *bom;
+  int type, status;
+  size_t nread;
+  uint8_t input[BOMMAX];
   FILE *fi, *fo;
 
   // Byte Order Mark (BOM) names and sequences.
-  char name[MAXBOM][30] = {"UTF-8", "UTF-16 (BE)", "UTF-16 (LE)", "UTF-32 (BE)", "UTF-32 (LE)", "UTF-7", "UTF-1", "UTF-EBCDIC", "SCSU", "BOCU-1", "GB18030"};
-  uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
-  uint8_t utf16be[2]    = {0xfe, 0xff};
-  uint8_t utf16le[2]    = {0xff, 0xfe};
-  uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
-  uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
-  uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
-  uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
-  uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
-  uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
-  uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
-  uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
+  static const uint8_t utf8[]      = {0xef, 0xbb, 0xbf};
+  static const uint8_t utf16be[]   = {0xfe, 0xff};
+  static const uint8_t utf16le[]   = {0xff, 0xfe};
+  static const uint8_t utf32be[]   = {0x00, 0x00, 0xfe, 0xff};
+  static const uint8_t utf32le[]   = {0xff, 0xfe, 0x00, 0x00};
+  static const uint8_t utf7[]      = {0x2b, 0x2f, 0x76};
+  static const uint8_t utf1[]      = {0xf7, 0x64, 0x4c};
+  static const uint8_t utfebcdic[] = {0xdd, 0x73, 0x66, 0x73};
+  static const uint8_t scsu[]      = {0x0e, 0xfe, 0xff};
+  static const uint8_t bocu1[]     = {0xfb, 0xee, 0x28};
+  static const uint8_t gb18030[]   = {0x84, 0x31, 0x95, 0x33};
 
-  // Allocate memory for various arrays.
-  filename = allocate_strmem (MAXLEN);
+  static const BOM bom[MAXBOM] = {
+    {sizeof (utf8),      "UTF-8",       utf8},
+    {sizeof (utf16be),   "UTF-16 (BE)", utf16be},
+    {sizeof (utf16le),   "UTF-16 (LE)", utf16le},
+    {sizeof (utf32be),   "UTF-32 (BE)", utf32be},
+    {sizeof (utf32le),   "UTF-32 (LE)", utf32le},
+    {sizeof (utf7),      "UTF-7",       utf7},
+    {sizeof (utf1),      "UTF-1",       utf1},
+    {sizeof (utfebcdic), "UTF-EBCDIC",  utfebcdic},
+    {sizeof (scsu),      "SCSU",        scsu},
+    {sizeof (bocu1),     "BOCU-1",      bocu1},
+    {sizeof (gb18030),   "GB18030",     gb18030}
+  };
 
   // Process the command line arguments, if any.
-  if (argc == 2) {
-    strncpy (filename, argv[1], MAXLEN);
-  
-  } else {
+  if (argc != 2) {
     fprintf (stdout, "\nUsage: ./stripbom inputfilename\n");
     fprintf (stdout, "       Output will be out.txt\n\n");
-    free (filename);
     return (EXIT_SUCCESS);
   }
 
-  // Allocate memory for various arrays.
-  temp = allocate_strmem (MAXLEN);
-  input = allocate_ustrmem (4);
-  bom = allocate_bommem (MAXBOM);
-  
-  // Populate array with Byte Order Mark data.
-  bom[0].len = 3;    bom[0].name = name[0];    bom[0].sequence = utf8;
-  bom[1].len = 2;    bom[1].name = name[1];    bom[1].sequence = utf16be;
-  bom[2].len = 2;    bom[2].name = name[2];    bom[2].sequence = utf16le;
-  bom[3].len = 4;    bom[3].name = name[3];    bom[3].sequence = utf32be;
-  bom[4].len = 4;    bom[4].name = name[4];    bom[4].sequence = utf32le;
-  bom[5].len = 3;    bom[5].name = name[5];    bom[5].sequence = utf7;
-  bom[6].len = 3;    bom[6].name = name[6];    bom[6].sequence = utf1;
-  bom[7].len = 4;    bom[7].name = name[7];    bom[7].sequence = utfebcdic;
-  bom[8].len = 3;    bom[8].name = name[8];    bom[8].sequence = scsu;
-  bom[9].len = 3;    bom[9].name = name[9];    bom[9].sequence = bocu1;
-  bom[10].len = 4;   bom[10].name = name[10];  bom[10].sequence = gb18030;
+  fprintf (stdout, "\nInput file: %s\n", argv[1]);
 
-  fprintf (stdout, "\nInput file: %s\n", filename);
-
-  // Open input file.
-  fi = fopen (filename, "rb");
+  // Open input file in binary mode because BOMs and the remaining file contents
+  // must be copied byte-for-byte.
+  fi = fopen (argv[1], "rb");
   if (fi == NULL) {
-    fprintf (stderr, "\nERROR: Unable to open input file %s.\n", filename);
-    exit (EXIT_FAILURE);
+    fprintf (stderr, "\nERROR: Unable to open input file %s.\n", argv[1]);
+    return (EXIT_FAILURE);
   }
 
-  // Count bytes in file.
-  nbytes = 0;
-  while (fgetc (fi) != EOF) {
-    nbytes++;
-  }
-  rewind (fi);
-
-  // Stop if less than 4 bytes in file.
-  if (nbytes < 4) {
-    fprintf (stderr, "ERROR: There are less than 4 bytes in input file %s.\n", filename);
-    fprintf (stderr, "       No action taken.\n\n");
-    exit (EXIT_FAILURE);
+  // Read up to the maximum supported BOM length. Short files are valid: a file
+  // may consist solely of a two- or three-byte BOM.
+  memset (input, 0, sizeof (input));
+  nread = fread (input, sizeof (uint8_t), sizeof (input), fi);
+  if (ferror (fi)) {
+    fprintf (stderr, "ERROR: Unable to read input file %s.\n", argv[1]);
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
 
-  // Read first four bytes of file.
-  for (i=0; i<4; i++) {
-    if ((input[i] = (uint8_t) fgetc (fi)) == EOF) {
-      fprintf (stderr, "ERROR: Can't read from input file %s.\n", filename);
-      exit (EXIT_FAILURE);
-    }
-  }
-  rewind (fi);
-
-  // Detect any Byte Order Mark (BOM) at beginning of first line.
-  type = byteordermark (input, bom);
+  // Detect any Byte Order Mark (BOM) at the beginning of the file.
+  type = byteordermark (input, nread, bom);
   if (type < 0) {
-    fprintf (stdout, "\nNo known existing Byte Order Mark (BOM) found in %s.\n\n", filename);
+    fprintf (stdout, "\nNo known existing Byte Order Mark (BOM) found in %s.\n\n", argv[1]);
     fprintf (stdout, "No action taken.\n\n");
+    if (fclose (fi) == EOF) {
+      fprintf (stderr, "ERROR: Unable to close input file %s.\n", argv[1]);
+      return (EXIT_FAILURE);
+    }
     return (EXIT_SUCCESS);
-  } else {
-    fprintf (stdout, "\nExisting Byte Order Mark (BOM) detected for character encoding type: %s\n\n", bom[type].name);
   }
 
-  // Open output file.
-  fo = fopen ("out.txt", "r");
-  if (fo != NULL) {
-    fprintf (stderr, "Output file out.txt already exists.\n");
-    exit (EXIT_FAILURE);
+  fprintf (stdout, "\nExisting Byte Order Mark (BOM) detected for character encoding type: %s\n\n", bom[type].name);
+
+  // Return to the start of the input file and then position immediately after
+  // the detected BOM.
+  if (fseek (fi, (long) bom[type].len, SEEK_SET) != 0) {
+    fprintf (stderr, "ERROR: Unable to seek past the BOM in input file %s.\n", argv[1]);
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
-  fo = fopen ("out.txt", "w");
+
+  // Create the output file only if it does not already exist.
+  errno = 0;
+  fo = fopen ("out.txt", "wbx");
   if (fo == NULL) {
-    fprintf (stderr, "Can't open output file out.txt.\n");
-    exit (EXIT_FAILURE);
+    if (errno == EEXIST) {
+      fprintf (stderr, "ERROR: Output file out.txt already exists.\n");
+    } else {
+      fprintf (stderr, "ERROR: Unable to open output file out.txt.\n");
+    }
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
 
-  // Skip existing BOM in input file.
-  for (i=0; i<bom[type].len; i++) {
-    fgetc (fi);
+  // Copy the remainder of the input file byte-for-byte.
+  status = copyfile (fi, fo);
+  if (status != EXIT_SUCCESS) {
+    fprintf (stderr, "ERROR: Unable to copy input file to out.txt.\n");
+    fclose (fi);
+    fclose (fo);
+    remove ("out.txt");
+    return (EXIT_FAILURE);
   }
 
-  // Copy remainder of input file to output file.
-  for (i=0; i<(nbytes - bom[type].len); i++) {
-    fputc (fgetc (fi), fo);
+  // Close both files and remove a partial output if closing it fails.
+  if (fclose (fi) == EOF) {
+    fprintf (stderr, "ERROR: Unable to close input file %s.\n", argv[1]);
+    if (fclose (fo) == EOF) {
+      fprintf (stderr, "ERROR: Unable to close output file out.txt.\n");
+    }
+    remove ("out.txt");
+    return (EXIT_FAILURE);
   }
 
-  // Close input and output files.
-  fclose (fi);
-  fclose (fo);
-
-  // Free allocated memory.
-  free (temp);
-  free (input);
-  free (bom);
-  free (filename);
+  if (fclose (fo) == EOF) {
+    fprintf (stderr, "ERROR: Unable to close output file out.txt.\n");
+    remove ("out.txt");
+    return (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }
 
-// Detect Byte Order Mark (BOM), if it exists, at beginning of line.
-// Return index of bom array corresponding to type of BOM detected,
-// or return -1 if none (or unlisted type) detected.
+// Detect a Byte Order Mark (BOM), if one exists at the beginning of the file.
+// Return the index of the longest matching BOM, or -1 if no supported BOM is
+// present. The available byte count is supplied so short files can be checked
+// safely without reading beyond the valid input bytes.
 int
-byteordermark (uint8_t *text, BOM *bom) {
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom) {
 
-  int type, i, found;
+  int type, best;
+  size_t bestlen;
 
-  // Loop through all types of Byte Order Marks.
+  if ((text == NULL) || (bom == NULL)) {
+    return (-1);
+  }
+
+  best = -1;
+  bestlen = 0;
+
+  // Keep the longest complete match because some BOMs are prefixes of longer
+  // BOMs. For example, UTF-16 LE (FF FE) prefixes UTF-32 LE (FF FE 00 00).
   for (type=0; type<MAXBOM; type++) {
+    if ((bom[type].len <= nbytes) && (bom[type].len > bestlen) && (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
+      best = type;
+      bestlen = bom[type].len;
+    }
+  }
 
-    found = 1;  // Default to current type detected.
-    for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) found = 0;
+  return (best);
+}
+
+// Copy the remainder of one binary stream to another.
+int
+copyfile (FILE *fi, FILE *fo) {
+
+  size_t nread;
+  uint8_t buffer[COPYLEN];
+
+  if ((fi == NULL) || (fo == NULL)) {
+    return (EXIT_FAILURE);
+  }
+
+  for (;;) {
+    nread = fread (buffer, sizeof (uint8_t), sizeof (buffer), fi);
+
+    if (nread > 0) {
+      if (fwrite (buffer, sizeof (uint8_t), nread, fo) != nread) {
+        return (EXIT_FAILURE);
+      }
     }
 
-    // We found a match.
-    if (found) return (type);
+    if (nread < sizeof (buffer)) {
+      if (ferror (fi)) {
+        return (EXIT_FAILURE);
+      }
+      break;
+    }
   }
 
-  // Failed to find a match.
-  return (-1);
-}
-
-// Allocate memory for an array of chars.
-char *
-allocate_strmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
-    exit (EXIT_FAILURE);
+  if (ferror (fo)) {
+    return (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of unsigned chars.
-uint8_t *
-allocate_ustrmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_ustrmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (uint8_t *) malloc (len * sizeof (uint8_t));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (uint8_t));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_ustrmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of BOM (Byte Order Mark) structs.
-BOM * 
-allocate_bommem (int len) {
-
-  void *tmp; 
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_bommem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-    
-  tmp = (BOM *) malloc (len * sizeof (BOM));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (BOM));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_bommem().\n");
-    exit (EXIT_FAILURE);
-  }
+  return (EXIT_SUCCESS);
 }

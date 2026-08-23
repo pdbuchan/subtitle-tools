@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,269 +16,171 @@
 
 #include "dvb.h"
 
-// Parse Program Map Table (PMT).
-// One PMT lists all PES PIDs and their Stream Types associated with a given Program Number.
-// Reference: ISO/IEC 13818-1
+// Parse a Program Map Table (PMT).
+// One PMT lists all elementary-stream PIDs and Stream Types associated with a
+// program identified by the PAT.
+// Reference: ISO/IEC 13818-1.
 int
 parse_pmt (STATE *state, PAT *pat, SECTION *section, FILE *fo) {
 
-  int index;
-  size_t i, offset, end, section_length, program_info_length, stream, nstreams, es_info_len, old_size, program_idx, new_elements;
-  uint8_t table_id, section_syntax_indicator, version_number, current_next_indicator, section_number, last_section_number, stream_type[MAX_STREAMS];
-  uint16_t pid, program_number, pcr_pid, elementary_stream_pid[MAX_STREAMS];
-  void *tmp;
+  int program_index;
+  size_t offset, section_length, total, entries_end, program_info_length;
+  size_t es_info_length, nstreams, capacity, i, pidx;
+  uint8_t table_id, ssi, version, current, section_number, last_section;
+  uint8_t stream_type;
+  uint16_t pid, program_number, pcr_pid, elementary_pid;
+  PMT_STREAM *list, *tmp;
 
   pid = state->pid;
-
-  // Set some arrays to 0.
-  memset (stream_type, 0, MAX_STREAMS * sizeof (uint8_t));
-  memset (elementary_stream_pid, 0, MAX_STREAMS * sizeof (uint16_t));
-
-  offset = 0;  // Start at beginning of section.
+  offset = 0;
+  nstreams = 0;
+  capacity = 0;
+  list = NULL;
 
   fprintf (fo, "Program Map Table (PMT):\n");
 
-  // Table ID (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
+  // Table ID (1 byte), Section Syntax Indicator (1 bit), and Section Length
+  // (12 bits).
+  if (!bytes_available (offset, 3, section[pid].length)) {
+    return (EXIT_FAILURE);
   }
-  table_id = section[pid].buffer[offset];
-  fprintf (fo, "  Table ID (1 byte): 0x%02x\n", table_id);
-  offset++;
-
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Section Syntax Indicator (1 bit)
-  section_syntax_indicator = (section[pid].buffer[offset] >> 7) & 1;
-  fprintf (fo, "  Section Syntax Indicator (1 bit): %u\n", section_syntax_indicator);
-
-  // 0 (1 bit)
-
-  // Reserved (2 bits)
-
-  // Section Length (12 bits)
-  section_length = (size_t) ((section[pid].buffer[offset] & 0x0f) << 8 |
-                 section[pid].buffer[offset + 1]);
-  fprintf (fo, "  Section Length (12 bits): %zu bytes (%zu bytes including table ID, SSI, section len)\n", section_length, section_length + 3);
+  table_id = section[pid].buffer[offset++];
+  ssi = (section[pid].buffer[offset] >> 7) & 1;
+  section_length = (size_t) (((section[pid].buffer[offset] & 0x0f) << 8) | section[pid].buffer[offset + 1]);
   offset += 2;
 
-  // Program Number (2 bytes)
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
+  if (table_id != 0x02 || ssi != 1 || section_length < 13 || section_length > 1021 || !bytes_available (0, section_length + 3, section[pid].length)) {
+    return (EXIT_FAILURE);
   }
-  program_number = (section[pid].buffer[offset]) << 8 |
-                 section[pid].buffer[offset + 1];
-  fprintf (fo, "  Program Number (2 bytes): 0x%04x\n", program_number);
+  total = section_length + 3;
+  entries_end = total - 4;  // CRC begins here.
+
+  // Program Number (2 bytes), Version Number (5 bits), Current/Next Indicator
+  // (1 bit), Section Number, Last Section Number, PCR PID (13 bits), and
+  // Program Info Length (12 bits).
+  if (!bytes_available (offset, 9, entries_end)) {
+    return (EXIT_FAILURE);
+  }
+  program_number = (uint16_t) (((uint16_t) section[pid].buffer[offset] << 8) | section[pid].buffer[offset + 1]);
+  offset += 2;
+  version = (section[pid].buffer[offset] >> 1) & 0x1f;
+  current = section[pid].buffer[offset++] & 1;
+  section_number = section[pid].buffer[offset++];
+  last_section = section[pid].buffer[offset++];
+  pcr_pid = (uint16_t) (((section[pid].buffer[offset] & 0x1f) << 8) | section[pid].buffer[offset + 1]);
+  offset += 2;
+  program_info_length = (size_t) (((section[pid].buffer[offset] & 0x0f) << 8) | section[pid].buffer[offset + 1]);
   offset += 2;
 
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
+  // This program currently expects the PMT to fit in one PSI section.
+  if (last_section != 0 || section_number != 0) {
+    fprintf (stderr, "Multi-section PMTs are not supported.\n");
+    return (EXIT_FAILURE);
+  }
+  if (!bytes_available (offset, program_info_length, entries_end)) {
+    return (EXIT_FAILURE);
   }
 
-  // Reserved (2 bits)
+  // Program descriptor loop. Descriptors are not currently interpreted here,
+  // but their declared length must be skipped before the ES loop begins.
+  offset += program_info_length;
 
-  // Version Number (5 bits)
-  version_number = (section[pid].buffer[offset] >> 1) & 0x1f;  // 0x1f = 0001 1111
-  fprintf (fo, "  Version Number (5 bits): 0x%02x\n", version_number);
+  fprintf (fo, "  Program: 0x%04x Version: %u Current: %u Section: %u/%u PCR PID: 0x%04x\n", program_number, version, current, section_number, last_section, pcr_pid);
 
-  // Normally you don't bother processing anything more if version hasn't changed.
-  // We will continue anyway for the sake of the output file.
-
-  // Current Next Indicator (1 bit)
-  current_next_indicator = section[pid].buffer[offset] & 1;
-  fprintf (fo, "  Current Next Indicator (1 bit): %u\n", current_next_indicator);
-  offset++;
-
-  // Section Number (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
-  }
-  section_number = section[pid].buffer[offset];
-  fprintf (fo, "  Section Number (1 byte): 0x%02x\n", section_number);
-  offset++;
-
-  // Last Section Number (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
-  }
-  last_section_number = section[pid].buffer[offset];
-  fprintf (fo, "  Last Section Number (1 byte): 0x%02x\n", last_section_number);
-  offset++;
-
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Reserved (3 bits)
-
-  // Program Clock Reference (PCR) PID (13 bits)
-  pcr_pid = ((section[pid].buffer[offset] & 0x1f) << 8) |
-             section[pid].buffer[offset + 1];
-  fprintf (fo, "  Program Clock Reference (PCR) PID (13 bits): 0x%04x\n", pcr_pid);
-  offset += 2;
-
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Reserved (4 bits)
-
-  // Program Info Length (12 bits)
-  program_info_length = (size_t) (((section[pid].buffer[offset] & 0x0f) << 8) |
-             section[pid].buffer[offset + 1]);
-  fprintf (fo, "  Program Info Length (12 bits): %zu bytes\n", program_info_length);
-  offset += 2;
-
-  // Descriptor Loop
-  if (program_info_length > 0) {
-    fprintf (fo, "  Program Descriptors:\n");
-    offset += program_info_length;  // Skip program-level descriptors
-  }
-
-  // Elementary Stream (ES) Loop
-  end = 3 + section_length - 4;  // end of ES loop (before CRC)
-  nstreams = 0;  // Initially assume no elementary streams.
-
-  while ((offset + 5) <= end) {  // Minimum ES entry size
-
-    fprintf (fo, "  Elementary Stream %lu:\n", nstreams);
-
-    // Stream Type (1 byte)
-    if (offset >= MAX_BUFFERLEN) {
-      fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-      exit (EXIT_FAILURE);
+  // Elementary Stream loop. Each entry supplies Stream Type, Elementary PID,
+  // and a descriptor-loop length.
+  while (offset < entries_end) {
+    if (!bytes_available (offset, 5, entries_end)) {
+      free (list);
+      return (EXIT_FAILURE);
     }
-    stream_type[nstreams] = section[pid].buffer[offset];
-    stream_types (state, stream_type[nstreams], fo);  // Prints description appropriate for stream_type.
-    offset++;
 
-    if ((offset + 1) >= MAX_BUFFERLEN) {
-      fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-      exit (EXIT_FAILURE);
-    }
-    // Reserved (3 bits)
-
-    // Elementary PID (13 bits)
-    elementary_stream_pid[nstreams] = ((section[pid].buffer[offset] & 0x1f) << 8) |
-                       section[pid].buffer[offset + 1];
-    fprintf (fo, "    Elementary PID (13 bits): 0x%04x\n", elementary_stream_pid[nstreams]);
+    stream_type = section[pid].buffer[offset++];
+    elementary_pid = (uint16_t) (((section[pid].buffer[offset] & 0x1f) << 8) | section[pid].buffer[offset + 1]);
+    offset += 2;
+    es_info_length = (size_t) (((section[pid].buffer[offset] & 0x0f) << 8) | section[pid].buffer[offset + 1]);
     offset += 2;
 
-    if ((offset + 1) >= MAX_BUFFERLEN) {
-      fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-      exit (EXIT_FAILURE);
+    if (!bytes_available (offset, es_info_length, entries_end)) {
+      free (list);
+      return (EXIT_FAILURE);
     }
 
-    // Reserved (4 bits)
+    // ES Descriptor Loop. As above, descriptors are reported indirectly via
+    // stream_type and skipped according to their declared aggregate length.
+    offset += es_info_length;
 
-    // ES Info Length (12 bits)
-    es_info_len = (size_t) (((section[pid].buffer[offset] & 0x0f) << 8) |
-                   section[pid].buffer[offset + 1]);
-    fprintf (fo, "    ES Info Length (12 bits): %zu bytes\n", es_info_len);
-    offset += 2;
+    fprintf (fo, "  Elementary Stream %zu PID 0x%04x type 0x%02x\n", nstreams, elementary_pid, stream_type);
+    stream_types (state, stream_type, fo);
 
-    // ES Descriptor Loop
-    offset += es_info_len;  // Skip ES descriptors
-
+    // Grow the temporary stream array geometrically while respecting the
+    // program-wide MAX_STREAMS limit.
+    if (nstreams == capacity) {
+      size_t new_capacity = capacity ? capacity * 2 : 8;
+      if (new_capacity > MAX_STREAMS) {
+        new_capacity = MAX_STREAMS;
+      }
+      if (new_capacity <= capacity) {
+        free (list);
+        return (EXIT_FAILURE);
+      }
+      tmp = realloc (list, new_capacity * sizeof (*list));
+      if (!tmp) {
+        free (list);
+        return (EXIT_FAILURE);
+      }
+      list = tmp;
+      capacity = new_capacity;
+    }
+    list[nstreams].elementary_stream_pid = elementary_pid;
+    list[nstreams].stream_type = stream_type;
     nstreams++;
-    if (nstreams > 1) {
-      fprintf (stderr, "Warning: More than one elementary streams listed in PMT.\n");
-      fprintf (stderr, "         The first elementary stream with DVB subtitles will be used:\n");
-      fprintf (stderr, "         Stream Type == 0x06, PES data ID == 0x20, DVB subtitle stream ID == 00\n");
-    }
-
-    // Set flag indicating PID listed in PMT corresponds to PES packets.
-    state->pid_type[state->pid] = PID_PES;
-
   }
 
-  // CRC (4 bytes)
-  if ((offset + 3) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pmt().\n");
-    exit (EXIT_FAILURE);
-  }
-  fprintf (fo, "  CRC (4 bytes): ");
-  for (i = 0; i < 4; i++) {
-    fprintf (fo, "%02x", section[pid].buffer[offset + i]);
-  }
-  fprintf (fo, "\n");
+  // CRC (4 bytes). It was validated before parse_pmt() was called.
+  fprintf (fo, "  CRC: %02x%02x%02x%02x\n", section[pid].buffer[entries_end], section[pid].buffer[entries_end + 1], section[pid].buffer[entries_end + 2], section[pid].buffer[entries_end + 3]);
 
-  // Determine the program index corresponding to current PID.
-  // If no program has been recorded for this PMT PID (weird, but could happen depending upon when recording of transport stream commenced),
-  // then no need to do anything else; a PAT will come along since they are transmitted roughly every 1/10th of a second.
-  if ((index = find_program_by_pmt_pid (pat, state->pid)) < 0) {
+  // Associate this PMT PID with the PROGRAM entry previously obtained from
+  // the PAT. An unrecognized PMT is still valid PSI, but it is not part of the
+  // PAT currently being followed by this program.
+  program_index = find_program_by_pmt_pid (pat, pid);
+  if (program_index < 0) {
+    free (list);
     return (EXIT_SUCCESS);
+  }
+  pidx = (size_t) program_index;
 
-  // Already have a program index for this PID.
-  } else {
-    program_idx = (size_t) index;
+  // The program_number carried by the PMT must agree with the PAT mapping.
+  if (program_number != pat->program[pidx].program_number) {
+    free (list);
+    return (EXIT_FAILURE);
   }
 
-  // If we already have the PMT with this version number, then no need to do anything else.
-  if ((pat->program[program_idx].pmt.version == version_number) && pat->program[program_idx].have_pmt) {
+  // Future PMTs and repeats of the active version are reported but do not
+  // replace the stored elementary-stream map.
+  if (!current || (pat->program[pidx].have_pmt && pat->program[pidx].pmt.version == version)) {
+    free (list);
     return (EXIT_SUCCESS);
+  }
 
-  // Must be new PMT or new version of PMT.
-  } else {
+  // Clear classifications while the old elementary PIDs are still known.
+  // The original code zeroed the structures first and consequently cleared
+  // PID 0 rather than the PIDs that had just been removed.
+  for (i = 0; i < pat->program[pidx].pmt.nstreams; i++) {
+    elementary_pid = pat->program[pidx].pmt.stream[i].elementary_stream_pid;
+    state->pid_type[elementary_pid] = PID_UNKNOWN;
+  }
+  free (pat->program[pidx].pmt.stream);
 
-    // Update version number.
-    pat->program[program_idx].pmt.version = version_number;
+  pat->program[pidx].pmt.stream = list;
+  pat->program[pidx].pmt.nstreams = nstreams;
+  pat->program[pidx].pmt.version = version;
+  pat->program[pidx].have_pmt = 1;
 
-    // Allocate memory for stream array, if more is needed.
-    old_size = pat->program[program_idx].pmt.nstreams;
-    if (nstreams > old_size) {
-      tmp = (PMT_STREAM *) realloc (pat->program[program_idx].pmt.stream, nstreams * sizeof (PMT_STREAM));
-      if (tmp != NULL) {
-        pat->program[program_idx].pmt.stream = tmp;
-      } else {
-        fprintf (stderr, "Cannot allocate memory for pmt->program[%zu].pmt.stream array of type PMT_STREAM.\n", program_idx);
-        fprintf (stderr, "nstreams: %zu\n", nstreams);
-        exit (EXIT_FAILURE);
-      }
-
-      // Initialize only the newly allocated memory.
-      new_elements = nstreams - old_size; // Calculate the number of new elements.
-      if (new_elements > 0) {
-        memset (&pat->program[program_idx].pmt.stream[old_size], 0, new_elements * sizeof (PMT_STREAM));
-
-        // Update pid_type for new PIDs to PID_UNKNOWN in state struct.
-        for (stream = old_size; stream < nstreams; stream++) {
-          state->pid_type[pat->program[program_idx].pmt.stream[stream].elementary_stream_pid] = PID_UNKNOWN;
-        }
-      }
-
-    // Enough memory is already allocated. Just clear it.
-    // nstreams <= old_size
-    } else {
-      for (stream = 0; stream < old_size; stream++) {
-        pat->program[program_idx].pmt.stream[stream].elementary_stream_pid = 0;
-        pat->program[program_idx].pmt.stream[stream].stream_type = 0;
-        state->pid_type[pat->program[program_idx].pmt.stream[stream].elementary_stream_pid] = PID_UNKNOWN;
-      }
-    }
-
-    // Copy stream IDs and types, and mark them as PES streams.
-    // All elementary streams listed in a PMT are, by definition, PES streams.
-    pat->program[program_idx].pmt.nstreams = nstreams;
-    for (stream = 0; stream < nstreams; stream++) {
-      pat->program[program_idx].pmt.stream[stream].elementary_stream_pid = elementary_stream_pid[stream];
-      pat->program[program_idx].pmt.stream[stream].stream_type = stream_type[stream];
-      state->pid_type[pat->program[program_idx].pmt.stream[stream].elementary_stream_pid] = PID_PES;
-    }
-
-    // Mark this program as having a parsed PMT. i.e., we have the (elementary_stream_pid, stream_type) values for
-    // each elementary stream, and we have identified those PIDs as PES.
-    pat->program[program_idx].have_pmt = 1;
+  // The PMT PID remains PSI. Only the elementary stream PIDs are PES.
+  state->pid_type[pid] = PID_PSI;
+  for (i = 0; i < nstreams; i++) {
+    state->pid_type[list[i].elementary_stream_pid] = PID_PES;
   }
 
   return (EXIT_SUCCESS);

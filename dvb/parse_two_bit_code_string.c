@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,129 +16,60 @@
 
 #include "dvb.h"
 
-// Parse a 2-bit/pixel Code String.
-// Reference: ETSI EN 300 743
-size_t
-parse_two_bit_code_string (STATE *state, SEGMENT *segment, size_t *bitpos, RLE *rle) {
+// Parse one command from a 2-bit/pixel DVB code string.
+// Reference: ETSI EN 300 743.
+//
+// The caller repeats this function until end_of_string_signal is set. Each
+// call either describes a run of pixels, one of the special zero-colour runs,
+// or the end-of-string marker.
+int
+parse_two_bit_code_string (STATE *s, SEGMENT *g, size_t *p, size_t lim, RLE *r) {
 
-  size_t bits_processed, run_length_3_10, run_length_12_27, run_length_29_284;
-  uint8_t byte, nextbits, switch_1, switch_2, switch_3;
+  uint8_t a, b, c, v;
 
-  bits_processed = 0;
-  rle->runlength = 0;
-  rle->color = 0;
-  rle->emit_one_00_pixel = 0;
-  rle->emit_two_00_pixels = 0;
+  r->runlength = 0;
+  r->color = 0;
+  r->emit_one_00_pixel = 0;
+  r->emit_two_00_pixels = 0;
 
-  // Next 2 bits look-ahead
-  get_8bits (state, segment, bitpos, &byte);
-  nextbits = (byte >> 6) & 0x03;
-  (*bitpos) += 2;
-  bits_processed += 2;
+  // Next 2 bits look-ahead. Any non-zero value is a single pixel whose colour
+  // is the two-bit value itself.
+  if (get_bits (s, g, p, lim, 2, &a)) return (EXIT_FAILURE);
+  if (a) {
+    r->runlength = 1;
+    r->color = a;
+    return (EXIT_SUCCESS);
+  }
 
-  // Single pixel (2 bits)
-  if (nextbits != 0) {
-    rle->runlength = 1;
-    rle->color = nextbits;
+  // Multi-pixel RLE: nextbits == 00. switch_1 selects a runlength of 3-10
+  // followed by an explicit two-bit colour.
+  if (get_bits (s, g, p, lim, 1, &b)) return (EXIT_FAILURE);
+  if (b) {
+    if (get_bits (s, g, p, lim, 3, &v) || get_bits (s, g, p, lim, 2, &r->color)) return (EXIT_FAILURE);
+    r->runlength = (size_t) v + 3;
+    return (EXIT_SUCCESS);
+  }
 
-    return (bits_processed);
+  // switch_2 == 1 emits one pixel of colour index 0.
+  if (get_bits (s, g, p, lim, 1, &b)) return (EXIT_FAILURE);
+  if (b) {
+    r->emit_one_00_pixel = 1;
+    return (EXIT_SUCCESS);
+  }
 
-  // Multi-pixel RLE
-  } else {
+  // switch_3 selects end-of-string, two pixels of colour 0, a runlength of
+  // 12-27 pixels, or a runlength of 29-284 pixels.
+  if (get_bits (s, g, p, lim, 2, &c)) return (EXIT_FAILURE);
+  if (c == 0) r->end_of_string_signal = 1;
+  else if (c == 1) r->emit_two_00_pixels = 1;
+  else if (c == 2) {
+    if (get_bits (s, g, p, lim, 4, &v) || get_bits (s, g, p, lim, 2, &r->color)) return (EXIT_FAILURE);
+    r->runlength = (size_t) v + 12;
+  }
+  else {
+    if (get_bits (s, g, p, lim, 8, &v) || get_bits (s, g, p, lim, 2, &r->color)) return (EXIT_FAILURE);
+    r->runlength = (size_t) v + 29;
+  }
 
-    // nextbits == 0b00 (2 bits)
-
-    // switch_1 (1 bit)
-    get_8bits (state, segment, bitpos, &byte);
-    switch_1 = (byte >> 7) & 0x01;
-    (*bitpos)++;
-    bits_processed++;
-
-    // Runlength 3-10 (3 bits) + color (2 bits)
-    if (switch_1) {
-
-      // Runlength 3-10 (3 bits)
-      get_8bits (state, segment, bitpos, &byte);
-      run_length_3_10 = (size_t) ((byte >> 5) & 0x07);  // 0x07 = 0000 0111
-      rle->runlength = run_length_3_10 + 3;
-      (*bitpos) += 3;
-      bits_processed += 3;
-
-      // Color (2 bits)
-      get_8bits (state, segment, bitpos, &byte);
-      rle->color = (byte >> 6) & 0x03;
-      (*bitpos) += 2;
-      bits_processed += 2;
-
-      return (bits_processed);
-
-    } else {
-
-      // switch_2 (1 bit)
-      get_8bits (state, segment, bitpos, &byte);
-      switch_2 = (byte >> 7) & 0x01;
-      (*bitpos)++;
-      bits_processed++;
-
-      // Emit one pixel of color index 0.
-      if (switch_2) {
-        rle->emit_one_00_pixel = 1;
-        return (bits_processed);
-
-      } else {
-
-        // switch_3 (2 bits)
-        get_8bits (state, segment, bitpos, &byte);
-        switch_3 = (byte >> 6) & 0x03;
-        (*bitpos) += 2;
-        bits_processed += 2;
-
-        switch (switch_3) {
-
-          case 0:  // End of string signal
-            rle->end_of_string_signal = 1;
-            break;
-
-          case 1:  // Emit two pixels with color index 0.
-            rle->emit_two_00_pixels = 1;
-            break;
-
-          case 2:  // Runlength 12-27 (4 bits) + color (2 bits)
-
-            // Runlength 12-27 (4 bits)
-            get_8bits (state, segment, bitpos, &byte);
-            run_length_12_27 = (size_t) ((byte >> 4) & 0x0f);  // 0x0f = 0000 1111
-            rle->runlength = run_length_12_27 + 12;
-            (*bitpos) += 4;
-            bits_processed += 4;
-
-            // Color (2 bits)
-            get_8bits (state, segment, bitpos, &byte);
-            rle->color = (byte >> 6) & 0x03;
-            (*bitpos) += 2;
-            bits_processed += 2;
-            break;
-
-          case 3:  // Runlength 29-284 (8 bits) + color (2 bits)
-
-            // Runlength 29-284 (8 bits)
-            get_8bits (state, segment, bitpos, &byte);
-            run_length_29_284 = (size_t) byte;
-            rle->runlength = run_length_29_284 + 29;
-            (*bitpos) += 8;
-            bits_processed += 8;
-
-            // Color (2 bits)
-            get_8bits (state, segment, bitpos, &byte);
-            rle->color = (byte >> 6) & 0x03;
-            (*bitpos) += 2;
-            bits_processed += 2;
-            break;
-
-        }  // End switch
-        return (bits_processed);
-
-      }  // End if !switch_2
-    }  // End is switch_1
-  }  // End if single or multi-pixel RLE
+  return (EXIT_SUCCESS);
 }

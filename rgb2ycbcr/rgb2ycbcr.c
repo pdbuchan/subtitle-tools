@@ -1,10 +1,10 @@
-/*  Copyright (C) 2024-2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2024-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    
+
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -15,7 +15,9 @@
 */
 
 // Convert 8-bit sRGB to YCbCr (BT.709).
-// Assumes sRGB gamma-correction was applied to sRGB; sRGB uses BT.709 color primaries. Applies BT.709 gamma-correction to produce YCbCr.
+// Assumes the input RGB values are standard nonlinear sRGB values. The sRGB
+// transfer function is reversed to obtain linear RGB, then the BT.709 OETF is
+// applied before the BT.709 Y'CbCr matrix and studio-range quantization.
 
 // gcc -Wall rgb2ycbcr.c -lm -o rgb2ycbcr
 
@@ -26,176 +28,178 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>  // for pow()
+#include <math.h>  // pow(), lround()
 #include <errno.h>
+#include <ctype.h>
 
 // Function prototypes
 int inputtext (char *);
+int parse_rgb_value (const char *, int *);
 int RGB2YCbCr (int, int, int, int *);
-int *allocate_intmem (int);
-char *allocate_strmem (int);
-double *allocate_doublemem (int);
-double **allocate_doublememp (int);
 
 // Set some symbolic constants.
 #define MAXLEN 256  // Maximum number of characters per line
 
 int
-main (int argc, char **argv) {
+main (void) {
 
-  int r, g, b, *ycbcr;
-  char *temp, *endptr;
-
-  // Allocate memory for various arrays.
-  ycbcr = allocate_intmem (3);
-  temp = allocate_strmem (MAXLEN);
+  int r, g, b, ycbcr[3];
+  char temp[MAXLEN];
 
   fprintf (stdout, "\nRed value (0-255)? ");
-  memset (temp, 0, MAXLEN * sizeof (char));
+  memset (temp, 0, sizeof (temp));
   inputtext (temp);
-  errno = 0;
-  r = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
-    fprintf (stderr, "ERROR: Cannot make integer of red value: %s\n", temp);
-    exit (EXIT_FAILURE);
+  if (parse_rgb_value (temp, &r) == EXIT_FAILURE) {
+    fprintf (stderr, "ERROR: Red value must be an integer from 0 through 255: %s\n", temp);
+    return (EXIT_FAILURE);
   }
 
   fprintf (stdout, "Green value (0-255)? ");
-  memset (temp, 0, MAXLEN * sizeof (char));
+  memset (temp, 0, sizeof (temp));
   inputtext (temp);
-  errno = 0;
-  g = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
-    fprintf (stderr, "ERROR: Cannot make integer of green value: %s\n", temp);
-    exit (EXIT_FAILURE);
+  if (parse_rgb_value (temp, &g) == EXIT_FAILURE) {
+    fprintf (stderr, "ERROR: Green value must be an integer from 0 through 255: %s\n", temp);
+    return (EXIT_FAILURE);
   }
 
   fprintf (stdout, "Blue value (0-255)? ");
-  memset (temp, 0, MAXLEN * sizeof (char));
+  memset (temp, 0, sizeof (temp));
   inputtext (temp);
-  errno = 0;
-  b = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
-    fprintf (stderr, "ERROR: Cannot make integer of blue value: %s\n", temp);
-    exit (EXIT_FAILURE);
+  if (parse_rgb_value (temp, &b) == EXIT_FAILURE) {
+    fprintf (stderr, "ERROR: Blue value must be an integer from 0 through 255: %s\n", temp);
+    return (EXIT_FAILURE);
   }
 
-  // Convert RGB to (y, Cb, Cr).
-  RGB2YCbCr (r, g, b, ycbcr);
+  // Convert RGB to YCbCr.
+  if (RGB2YCbCr (r, g, b, ycbcr) == EXIT_FAILURE) {
+    fprintf (stderr, "ERROR: Unable to convert RGB to YCbCr.\n");
+    return (EXIT_FAILURE);
+  }
 
   fprintf (stdout, "\nRGB (%i, %i, %i) = YCbCr (%i, %i, %i)\n", r, g, b, ycbcr[0], ycbcr[1], ycbcr[2]);
   fprintf (stdout, "RGB (0x%02x, 0x%02x, 0x%02x) = YCbCr (0x%02x, 0x%02x, 0x%02x)\n", r, g, b, ycbcr[0], ycbcr[1], ycbcr[2]);
 
-  // Free allocated memory.
-  free (ycbcr);
-  free (temp);
+  return (EXIT_SUCCESS);
+}
+
+// Parse one RGB component and require the entire non-whitespace input to be a
+// decimal integer in the inclusive range 0 through 255.
+int
+parse_rgb_value (const char *text, int *value) {
+
+  char *endptr;
+  long n;
+
+  if ((text == NULL) || (value == NULL)) {
+    return (EXIT_FAILURE);
+  }
+
+  errno = 0;
+  endptr = NULL;
+  n = strtol (text, &endptr, 10);
+
+  if ((errno == ERANGE) || (endptr == text)) {
+    return (EXIT_FAILURE);
+  }
+
+  // Permit trailing whitespace, but no other trailing characters.
+  while ((*endptr != '\0') && isspace ((unsigned char) *endptr)) {
+    endptr++;
+  }
+
+  if ((*endptr != '\0') || (n < 0L) || (n > 255L)) {
+    return (EXIT_FAILURE);
+  }
+
+  *value = (int) n;
 
   return (EXIT_SUCCESS);
 }
 
-// Convert 8-bit sRGB color to BT.709 YCbCr.
-// Assumes sRGB gamma-correction was applied to sRGB; sRGB uses BT.709 color primaries. Applies BT.709 gamma-correction to produce YCbCr.
-// High definition video use BT.709 colorspace (standard definition video uses BT.601 colorspace).
+// Convert 8-bit nonlinear sRGB color to studio-range BT.709 Y'CbCr.
+//
+// sRGB and BT.709 use the same D65 chromaticities and primaries but different
+// transfer functions. Therefore the input sRGB values are first linearized
+// with the inverse sRGB transfer function and then encoded with the BT.709
+// OETF before applying the BT.709 Y'CbCr matrix.
+//
+// The resulting 8-bit code ranges are:
+//   16 <= Y' <= 235
+//   16 <= Cb <= 240
+//   16 <= Cr <= 240
+//
 // References: SMPTE RP 177-1993, ITU-R BT.709-6, ITU-T H.273 (V4), IEC 61966-2-1:1999
 int
 RGB2YCbCr (int r, int g, int b, int *yCbCr) {
 
   int i;
-  double *rgb1, y1, pb, pr, y, cb, cr, **cm, yscale, pbscale, prscale;
-  const double KB = 0.0721923154;
-  const double KR = 0.2126390059;
-  const double KG = 0.7151686788;
+  double rgb1[3], y1, pb, pr, y, cb, cr;
+
+  // BT.709 matrix coefficients as specified by ITU-R BT.709.
+  const double KR = 0.2126;
+  const double KB = 0.0722;
+  const double KG = 1.0 - KR - KB;  // 0.7152
+
   const double Yoffset = 16.0;
   const double Cboffset = 128.0;
   const double Croffset = 128.0;
+  const double yscale = 219.0;   // 235 - 16
+  const double cbscale = 224.0;  // 240 - 16
+  const double crscale = 224.0;  // 240 - 16
 
-  // Variable Definitions
-  //   yCbCr[3] array contains the Luma, Color Difference Blue (Chroma Blue), and Color Difference Red (Chroma Red), where
-  //   16 <= Y <= 235, 16 <= Cb <= 240, 16 <= Cr <= 240.
-  //   y1, pb, and pr are the normalized YCbCr signals (i.e., prior to scaling and offsets), where
-  //   y1 (i.e., Y-prime) has range 0 to 1, and Pb and Pr have range -0.5 to 0.5.
-  //   r1, g1, and b1 (i.e., r-prime, g-prime, and b-prime) are the normalized values of r, g, and b, each with range 0 to 1.
-
-  // Allocate memory for various arrays.
-  cm = allocate_doublememp (3);
-  for (i=0; i<3; i++) {
-    cm[i] = allocate_doublemem (3);
+  if ((yCbCr == NULL) ||
+      (r < 0) || (r > 255) ||
+      (g < 0) || (g > 255) ||
+      (b < 0) || (b > 255)) {
+    return (EXIT_FAILURE);
   }
-  rgb1 = allocate_doublemem (3);
 
-  // Normalize r,g,b (0-255) to r1,g1,b1 (0-1).
+  // Normalize R',G',B' from 0-255 to 0-1.
   rgb1[0] = (double) r / 255.0;
   rgb1[1] = (double) g / 255.0;
   rgb1[2] = (double) b / 255.0;
 
-  // Reverse sRGB gamma-correction. i.e., convert to linear rgb.
-  for (i=0; i<3; i++) {
-    if (rgb1[i] > (12.92 * 0.0031308)) {
+  // Reverse the sRGB transfer function to obtain linear-light RGB.
+  for (i = 0; i < 3; i++) {
+    if (rgb1[i] > 0.04045) {
       rgb1[i] = pow ((rgb1[i] + 0.055) / 1.055, 2.4);
     } else {
       rgb1[i] /= 12.92;
     }
   }
 
-  // Apply BT.709 gamma-correction to linear rgb.
-  for (i=0; i<3; i++) {
+  // Apply the BT.709 OETF to linear RGB.
+  for (i = 0; i < 3; i++) {
     if (rgb1[i] < 0.018) {
-      rgb1[i]*= 4.5;
+      rgb1[i] *= 4.5;
     } else {
       rgb1[i] = (1.099 * pow (rgb1[i], 0.45)) - 0.099;
     }
   }
 
-  // Define the color matrix.
-  // cm[row][col]
-  cm[0][0] = KR;                          cm[0][1] = KG;                          cm[0][2] = KB;
-  cm[1][0] = -0.5 * KR / (1.0 - KB);      cm[1][1] = -0.5 * KG / (1.0 - KB);      cm[1][2] = 0.5;
-  cm[2][0] = 0.5;                         cm[2][1] = -0.5 * KG / (1.0 - KR);      cm[2][2] = -0.5 * KB / (1.0 - KR);
+  // Derive normalized BT.709 luma and color-difference signals.
+  y1 = (KR * rgb1[0]) + (KG * rgb1[1]) + (KB * rgb1[2]);
+  pb = 0.5 * (rgb1[2] - y1) / (1.0 - KB);
+  pr = 0.5 * (rgb1[0] - y1) / (1.0 - KR);
 
-  // Set scaling factors to achieve required ranges.
-  yscale = 235.0 - 16.0;   // 16 <= Y <= 235, where 16 = black, 235 = white
-  pbscale = 240.0 - 16.0;  // 16 <= Cb <= 240
-  prscale = 240.0 - 16.0;  // 16 <= Cr <= 240
-
-  // Multiply color matrix by r1,g1,b1 vector to obtain Y1PbPr.
-  y1 = (cm[0][0] * rgb1[0]) + (cm[0][1] * rgb1[1]) + (cm[0][2] * rgb1[2]);
-  pb = (cm[1][0] * rgb1[0]) + (cm[1][1] * rgb1[1]) + (cm[1][2] * rgb1[2]);
-  pr = (cm[2][0] * rgb1[0]) + (cm[2][1] * rgb1[1]) + (cm[2][2] * rgb1[2]);
-
-  // Apply scaling and offsets to obtain YCbCr.
+  // Quantize to 8-bit studio-range Y'CbCr.
   y = (y1 * yscale) + Yoffset;
-  cb = (pb * pbscale) + Cboffset;
-  cr = (pr * prscale) + Croffset;
+  cb = (pb * cbscale) + Cboffset;
+  cr = (pr * crscale) + Croffset;
 
-  // Round and take integer.
-  yCbCr[0] = (int) (y + 0.5);
-  yCbCr[1] = (int) (cb + 0.5);
-  yCbCr[2] = (int) (cr + 0.5);
+  yCbCr[0] = (int) lround (y);
+  yCbCr[1] = (int) lround (cb);
+  yCbCr[2] = (int) lround (cr);
 
-  // Clip any undershoot or overshoot resulting from the fact that
-  // 8-bit RGB (0-255) has a somewhat different color gamut than YCbCr.
-
-  // Luminance bounds check
-  // 16 <= Y <= 235
+  // Clip any small numerical undershoot or overshoot to legal code ranges.
   if (yCbCr[0] < 16) yCbCr[0] = 16;
   if (yCbCr[0] > 235) yCbCr[0] = 235;
 
-  // Color difference blue bounds check
-  // 16 <= Cb <= 240
   if (yCbCr[1] < 16) yCbCr[1] = 16;
   if (yCbCr[1] > 240) yCbCr[1] = 240;
 
-  // Color difference red bounds check
-  // 16 <= Cr <= 240
   if (yCbCr[2] < 16) yCbCr[2] = 16;
   if (yCbCr[2] > 240) yCbCr[2] = 240;
-
-  // Free allocated memory.
-  for (i=0; i<3; i++) {
-    free (cm[i]);
-  }
-  free (cm);
-  free (rgb1);
 
   return (EXIT_SUCCESS);
 }
@@ -204,97 +208,56 @@ RGB2YCbCr (int r, int g, int b, int *yCbCr) {
 int
 inputtext (char *text) {
 
-  // Request new text from standard input.
-  fgets (text, MAXLEN, stdin);
+  int ch;
+  size_t len;
 
-  // Remove trailing newline, if there.
-  if ((strnlen(text, MAXLEN) > 0) && (text[strnlen (text, MAXLEN) - 1] == '\n')) {
-    text[strnlen (text, MAXLEN) - 1] = '\0';  // Replace newline with string termination.
+  if (text == NULL) {
+    return (EXIT_FAILURE);
+  }
+
+  if (fgets (text, MAXLEN, stdin) == NULL) {
+    fprintf (stderr, "Unable to read text from standard input.\n");
+    return (EXIT_FAILURE);
+  }
+
+  len = strlen (text);
+
+  // Remove trailing newline, and a preceding carriage return if present.
+  if ((len > 0u) && (text[len - 1u] == '\n')) {
+    text[--len] = '\0';
+    if ((len > 0u) && (text[len - 1u] == '\r')) {
+      text[--len] = '\0';
+    }
+    return (EXIT_SUCCESS);
+  }
+
+  // If the buffer is full, determine whether the input was exactly
+  // MAXLEN - 1 characters or was genuinely too long.
+  if (len == (size_t) MAXLEN - 1u) {
+
+    ch = getchar ();
+
+    // Exactly MAXLEN - 1 characters followed by newline or EOF.
+    if ((ch == '\n') || (ch == EOF)) {
+      return (EXIT_SUCCESS);
+    }
+
+    // Handle CRLF after an exactly full input line.
+    if (ch == '\r') {
+      ch = getchar ();
+      if ((ch == '\n') || (ch == EOF)) {
+        return (EXIT_SUCCESS);
+      }
+    }
+
+    // Discard the remainder of an overlong input line.
+    while ((ch != '\n') && (ch != EOF)) {
+      ch = getchar ();
+    }
+
+    fprintf (stderr, "Input text is too long; maximum is %d characters.\n", MAXLEN - 1);
+    return (EXIT_FAILURE);
   }
 
   return (EXIT_SUCCESS);
-}
-
-// Allocate memory for an array of ints.
-int *
-allocate_intmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_intmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (int *) malloc (len * sizeof (int));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (int));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_intmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of chars.
-char *
-allocate_strmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of doubles.
-double *
-allocate_doublemem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_doublemem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (double *) malloc (len * sizeof (double));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (double));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_doublemem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of pointers to arrays of doubles.
-double **
-allocate_doublememp (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_doublememp().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (double **) malloc (len * sizeof (double *));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (double *));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_doublememp().\n");
-    exit (EXIT_FAILURE);
-  }
 }

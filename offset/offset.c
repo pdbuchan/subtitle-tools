@@ -1,4 +1,4 @@
-/*  Copyright (C) 2024-2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2024-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,9 +24,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>  // uint8_t
+#include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <errno.h>
+#include <ctype.h>
+#include <limits.h>
 
 // Definition of structs
 typedef struct {
@@ -45,6 +48,7 @@ typedef struct {
 
 // Function prototypes
 int inputtext (char *);
+int parse_int_string (const char *, int *);
 int readline (FILE *, char *, int);
 int byteordermark (char *, BOM *);
 int extract_time (char*, TIME *, TIME *);
@@ -65,7 +69,7 @@ int
 main (int argc, char **argv) {
 
   int i, type, alllines, nlines, line, nsubs;
-  char *temp, *filename, **input, *endptr;
+  char *temp, *filename, **input;
   BOM *bom;
   TIME start, end, offset;
   FILE *fi, *fo;
@@ -89,7 +93,11 @@ main (int argc, char **argv) {
 
   // Process the command line arguments, if any.
   if (argc == 2) {
-    strncpy (filename, argv[1], MAXLEN);
+    if (snprintf (filename, MAXLEN, "%s", argv[1]) >= MAXLEN) {
+      fprintf (stderr, "ERROR: Input filename is too long.\n");
+      free (filename);
+      return (EXIT_FAILURE);
+    }
 
   } else {
     fprintf (stdout, "\nUsage: ./offset inputfilename.srt\n");
@@ -123,9 +131,7 @@ main (int argc, char **argv) {
   fprintf (stdout, "\nWhat is desired offset hours? ");
   memset (temp, 0, MAXLEN * sizeof (char));
   inputtext (temp);
-  errno = 0;
-  offset.h = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
+  if (parse_int_string (temp, &offset.h) == EXIT_FAILURE) {
     fprintf (stderr, "ERROR: Cannot make integer of offset hours: %s\n", temp);
     exit (EXIT_FAILURE);
   }
@@ -133,9 +139,7 @@ main (int argc, char **argv) {
   fprintf (stdout, "What is desired offset minutes? ");
   memset (temp, 0, MAXLEN * sizeof (char));
   inputtext (temp);
-  errno = 0;
-  offset.m = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
+  if (parse_int_string (temp, &offset.m) == EXIT_FAILURE) {
     fprintf (stderr, "ERROR: Cannot make integer of offset minutes: %s\n", temp);
     exit (EXIT_FAILURE);
   }
@@ -143,9 +147,7 @@ main (int argc, char **argv) {
   fprintf (stdout, "What is desired offset seconds? ");
   memset (temp, 0, MAXLEN * sizeof (char));
   inputtext (temp);
-  errno = 0;
-  offset.s = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
+  if (parse_int_string (temp, &offset.s) == EXIT_FAILURE) {
     fprintf (stderr, "ERROR: Cannot make integer of offset seconds: %s\n", temp);
     exit (EXIT_FAILURE);
   }
@@ -153,9 +155,7 @@ main (int argc, char **argv) {
   fprintf (stdout, "What is desired offset milliseconds? ");
   memset (temp, 0, MAXLEN * sizeof (char));
   inputtext (temp);
-  errno = 0;
-  offset.ms = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
+  if (parse_int_string (temp, &offset.ms) == EXIT_FAILURE) {
     fprintf (stderr, "ERROR: Cannot make integer of offset milliseconds: %s\n", temp);
     exit (EXIT_FAILURE);
   }
@@ -171,12 +171,39 @@ main (int argc, char **argv) {
   }
 
   // Count lines of input SubRip file.
-  alllines = 0;  // Count of lines
-  while (readline (fi, temp, MAXLEN) != -1) {
+  alllines = 0;
+  for (;;) {
+    int status = readline (fi, temp, MAXLEN);
+
+    if (status == -1) break;
+    if (status == -2) {
+      fprintf (stderr, "ERROR: Line %i in input SubRip file does not fit in the %d-byte input buffer.\n", alllines + 1, MAXLEN);
+      fclose (fi);
+      exit (EXIT_FAILURE);
+    }
+    if (status == -3) {
+      fprintf (stderr, "ERROR: Unable to read input SubRip file %s.\n", filename);
+      fclose (fi);
+      exit (EXIT_FAILURE);
+    }
     alllines++;
   }
+
+  if (alllines == 0) {
+    fprintf (stderr, "ERROR: Input SubRip file %s is empty.\n", filename);
+    fclose (fi);
+    exit (EXIT_FAILURE);
+  }
+
   fprintf (stdout, "\n%i lines found including any excess trailing line-feeds.\n", alllines);
+
+  clearerr (fi);
   rewind (fi);
+  if (ferror (fi)) {
+    fprintf (stderr, "ERROR: Unable to rewind input SubRip file %s.\n", filename);
+    fclose (fi);
+    exit (EXIT_FAILURE);
+  }
 
   // Allocate memory for array to hold input file.
   input = allocate_strmemp (alllines);
@@ -186,73 +213,127 @@ main (int argc, char **argv) {
 
   // Read input SubRip file into array input.
   for (line=0; line<alllines; line++) {
-    if (readline (fi, input[line], MAXLEN) == -1) {
-      fprintf (stderr, "\nERROR: Cannot read line %i from input SubRip file %s.\n", line + 1, filename);
+    int status = readline (fi, input[line], MAXLEN);
+
+    if (status == -2) {
+      fprintf (stderr, "ERROR: Line %i in input SubRip file does not fit in the %d-byte input buffer.\n", line + 1, MAXLEN);
+      fclose (fi);
       exit (EXIT_FAILURE);
     }
-  }  // Next line
-
-  // Close input file.
-  fclose (fi);
-
-  // Remove excess line-feeds at end of array input.
-  nlines = alllines;
-  for (line=alllines; line>1; line--) {
-    if ((input[line - 1][0] == '\n') && (input[line - 2][0] == '\n')) {
-      nlines--;
-    } else {
-      break;
+    if (status == -3) {
+      fprintf (stderr, "ERROR: Unable to read line %i from input SubRip file %s.\n", line + 1, filename);
+      fclose (fi);
+      exit (EXIT_FAILURE);
+    }
+    if (status == -1) {
+      fprintf (stderr, "ERROR: Unexpected end of input while rereading line %i from %s.\n", line + 1, filename);
+      fclose (fi);
+      exit (EXIT_FAILURE);
     }
   }
-  fprintf (stdout, "%i lines found excluding trailing line-feeds.\n", nlines);
 
-  // Detect any Byte Order Mark (BOM) at beginning of first line.
+  // Close input file.
+  if (fclose (fi) != 0) {
+    fprintf (stderr, "ERROR: Unable to close input SubRip file %s.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
+  // Remove excess line-feeds at end of array input, leaving the one blank line
+  // that terminates the final subtitle.
+  nlines = alllines;
+  while ((nlines > 1) && (input[nlines - 1][0] == '\n') && (input[nlines - 2][0] == '\n')) {
+    nlines--;
+  }
+  fprintf (stdout, "%i lines found excluding excess trailing line-feeds.\n", nlines);
+
+  // Detect any Byte Order Mark (BOM) at beginning of first line. Longest-match
+  // detection is required because UTF-16 LE is a prefix of UTF-32 LE.
   type = byteordermark (input[0], bom);
   if (type < 0) {
     fprintf (stdout, "\nNo known Byte Order Mark (BOM) found in %s.\n", filename);
   } else {
     fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
+
+    // This program parses SubRip syntax as single-byte/UTF-8 text. Preserve a
+    // UTF-8 BOM, but do not attempt to parse incompatible multibyte encodings.
+    if (type != 0) {
+      fprintf (stderr, "ERROR: Character encoding %s is not supported by this byte-oriented SubRip parser.\n", bom[type].name);
+      exit (EXIT_FAILURE);
+    }
   }
 
-  // Count number of subtitles in SubRip file; assume at least one.
+  // Count and structurally validate subtitles. Existing subtitle numbers are
+  // intentionally ignored because the output is renumbered from 1 to N.
   nsubs = 0;
-  for (line=0; line<nlines; line++) {
+  line = 0;
+  while (line < nlines) {
 
-    nsubs++;
-
-    // Advance through to next subtitle number, if there is one.
-    // End of current subtitle is demarcated by a line containing only a line-feed.
-    while (input[line][0] != '\n') {
-      line++;
-      if (line == nlines) break;
+    if (input[line][0] == '\n') {
+      fprintf (stderr, "ERROR: Unexpected blank line at input line %i.\n", line + 1);
+      exit (EXIT_FAILURE);
     }
 
-  }  // Next sub
+    // Skip existing subtitle number.
+    line++;
+    if (line >= nlines || input[line][0] == '\n') {
+      fprintf (stderr, "ERROR: Missing timestamp for subtitle %i.\n", nsubs + 1);
+      exit (EXIT_FAILURE);
+    }
+
+    // Skip timestamp and any subtitle text.
+    line++;
+    while ((line < nlines) && (input[line][0] != '\n')) {
+      line++;
+    }
+
+    if (line >= nlines) {
+      fprintf (stderr, "ERROR: Subtitle %i is not terminated by a blank line.\n", nsubs + 1);
+      exit (EXIT_FAILURE);
+    }
+
+    line++;  // Skip subtitle-closing blank line.
+    nsubs++;
+  }
+
+  if (nsubs == 0) {
+    fprintf (stderr, "ERROR: No subtitles found in input file.\n");
+    exit (EXIT_FAILURE);
+  }
+
   fprintf (stdout, "\n%i subtitles found.\n\n", nsubs);
 
-  // Open output file.
-  fo = fopen ("out.srt", "r");
-  if (fo != NULL) {
-    fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
-    exit (EXIT_FAILURE);
-  }
-  fo = fopen ("out.srt", "w");
+  // Open output file without overwriting an existing file.
+  fo = fopen ("out.srt", "wx");
   if (fo == NULL) {
-    fprintf (stderr, "ERROR: Unable to open output file out.srt.\n");
+    if (errno == EEXIST) {
+      fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
+    } else {
+      fprintf (stderr, "ERROR: Unable to create output file out.srt.\n");
+    }
     exit (EXIT_FAILURE);
   }
 
-  // Write Byte Order Mark (BOM) to output file if detected in input file.
-  if (type != -1) {
-    fwrite (bom[type].sequence, bom[type].len * sizeof (uint8_t), 1, fo);
+  // Write Byte Order Mark (BOM) to output file if a UTF-8 BOM was detected.
+  if (type == 0) {
+    if (fwrite (bom[type].sequence, 1u, (size_t) bom[type].len, fo) != (size_t) bom[type].len) {
+      fprintf (stderr, "ERROR: Unable to write Byte Order Mark to out.srt.\n");
+      fclose (fo);
+      remove ("out.srt");
+      exit (EXIT_FAILURE);
+    }
   }
 
   // Loop through all subtitles.
   line = 0;  // Line index of input file
   for (i=0; i<nsubs; i++) {
 
-    // Write subtitle number.
-    fprintf (fo, "%i\n", i + 1);
+    // Write new subtitle number and skip the original one.
+    if (fprintf (fo, "%i\n", i + 1) < 0) {
+      fprintf (stderr, "ERROR: Unable to write output file out.srt.\n");
+      fclose (fo);
+      remove ("out.srt");
+      exit (EXIT_FAILURE);
+    }
     line++;
 
     // Extract start and end times.
@@ -263,43 +344,72 @@ main (int argc, char **argv) {
     start.totalms += offset.totalms;
     end.totalms += offset.totalms;
 
-    // Update hours, minutes, seconds, milliseconds of start and end structs.
-    mstotime (&start);
-    mstotime (&end);
-
-    // Check for underflows.
+    // A negative SubRip timestamp cannot be represented. Check before
+    // converting the totals back to component fields.
     if ((start.totalms < 0) || (end.totalms < 0)) {
       fprintf (stderr, "ERROR: Underflow in timestamp. Too much negative offset applied?\n");
       fprintf (stderr, "\n%i\n", i + 1);
-      fprintf (stdout, "%02i:%02i:%02i,%03i --> %02i:%02i:%02i,%03i\n\n", start.h, start.m, start.s, start.ms, end.h, end.m, end.s, end.ms);
+      fprintf (stderr, "Shifted totals: start=%" PRId64 " ms, end=%" PRId64 " ms\n\n", start.totalms, end.totalms);
+      fclose (fo);
+      remove ("out.srt");
       exit (EXIT_FAILURE);
     }
 
-    // Write updated start and end timestamps to output file.
-    fprintf (fo, "%02i:%02i:%02i,%03i --> %02i:%02i:%02i,%03i\n", start.h, start.m, start.s, start.ms, end.h, end.m, end.s, end.ms);
-//    fprintf (stdout, "%02i:%02i:%02i,%03i --> %02i:%02i:%02i,%03i\n", start.h, start.m, start.s, start.ms, end.h, end.m, end.s, end.ms);
-
-    // Write all text of current subtitle to output file.
-    while (input[line][0] != '\n') {
-      fprintf (fo, "%s", input[line]);
-      line++;
-      if (line == nlines) break;
+    // Update hours, minutes, seconds, milliseconds of start and end structs.
+    if ((mstotime (&start) == EXIT_FAILURE) || (mstotime (&end) == EXIT_FAILURE)) {
+      fprintf (stderr, "ERROR: Unable to convert shifted timestamp.\n");
+      fclose (fo);
+      remove ("out.srt");
+      exit (EXIT_FAILURE);
     }
 
-    // End of sub line-feed
-    fprintf (fo, "\n");
+    // Write updated start and end timestamps.
+    if (fprintf (fo, "%02i:%02i:%02i,%03i --> %02i:%02i:%02i,%03i\n", start.h, start.m, start.s, start.ms, end.h, end.m, end.s, end.ms) < 0) {
+      fprintf (stderr, "ERROR: Unable to write output file out.srt.\n");
+      fclose (fo);
+      remove ("out.srt");
+      exit (EXIT_FAILURE);
+    }
+
+    // Write all text of current subtitle.
+    while ((line < nlines) && (input[line][0] != '\n')) {
+      if (fputs (input[line], fo) == EOF) {
+        fprintf (stderr, "ERROR: Unable to write output file out.srt.\n");
+        fclose (fo);
+        remove ("out.srt");
+        exit (EXIT_FAILURE);
+      }
+      line++;
+    }
+
+    if ((line >= nlines) || (input[line][0] != '\n')) {
+      fprintf (stderr, "ERROR: Internal subtitle-structure error while writing subtitle %i.\n", i + 1);
+      fclose (fo);
+      remove ("out.srt");
+      exit (EXIT_FAILURE);
+    }
+
+    // End-of-subtitle blank line.
+    if (fputc ('\n', fo) == EOF) {
+      fprintf (stderr, "ERROR: Unable to write output file out.srt.\n");
+      fclose (fo);
+      remove ("out.srt");
+      exit (EXIT_FAILURE);
+    }
     line++;
+  }
 
-  }  // Next subtitle
-
-  // Close output file.
-  fclose (fo);
+  if (fclose (fo) != 0) {
+    fprintf (stderr, "ERROR: Unable to close output file out.srt after writing.\n");
+    remove ("out.srt");
+    exit (EXIT_FAILURE);
+  }
 
   // Free allocated memory.
   free (temp);
   free (bom);
   free (filename);
-  for (line=0; line<alllines; line++) {
+  for (line = 0; line < alllines; line++) {
     free (input[line]);
   }
   free (input);
@@ -311,66 +421,156 @@ main (int argc, char **argv) {
 int
 inputtext (char *text) {
 
-  // Request new text from standard input.
-  fgets (text, MAXLEN, stdin);
+  int ch;
+  size_t len;
 
-  // Remove trailing newline, if there.
-  if ((strnlen(text, MAXLEN) > 0) && (text[strnlen (text, MAXLEN) - 1] == '\n')) {
-    text[strnlen (text, MAXLEN) - 1] = '\0';  // Replace newline with string termination.
+  if (fgets (text, MAXLEN, stdin) == NULL) {
+    fprintf (stderr, "Unable to read text from standard input.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  len = strlen (text);
+
+  // Remove trailing newline, and a preceding carriage return if present.
+  if ((len > 0) && (text[len - 1] == '\n')) {
+    text[--len] = '\0';
+    if ((len > 0) && (text[len - 1] == '\r')) {
+      text[--len] = '\0';
+    }
+    return (EXIT_SUCCESS);
+  }
+
+  // If the buffer is full, determine whether the input was exactly
+  // MAXLEN - 1 characters or was genuinely too long.
+  if (len == MAXLEN - 1) {
+
+    ch = getchar ();
+
+    // Exactly MAXLEN - 1 characters followed by newline or EOF.
+    if ((ch == '\n') || (ch == EOF)) {
+      return (EXIT_SUCCESS);
+    }
+
+    // Handle CRLF after an exactly full input line.
+    if (ch == '\r') {
+      ch = getchar ();
+      if ((ch == '\n') || (ch == EOF)) {
+        return (EXIT_SUCCESS);
+      }
+    }
+
+    // Discard the remainder of an overlong input line.
+    while ((ch != '\n') && (ch != EOF)) {
+      ch = getchar ();
+    }
+
+    fprintf (stderr, "Input text is too long; maximum is %d characters.\n", MAXLEN - 1);
+    exit (EXIT_FAILURE);
   }
 
   return (EXIT_SUCCESS);
 }
 
-// Read a single line of text from a text file.
-// Returns -1 if EOF is encountered.
+// Parse a complete decimal integer string.
+int
+parse_int_string (const char *text, int *value) {
+
+  char *endptr;
+  long parsed;
+
+  if ((text == NULL) || (value == NULL)) return (EXIT_FAILURE);
+
+  errno = 0;
+  parsed = strtol (text, &endptr, 10);
+  if ((errno == ERANGE) || (endptr == text)) return (EXIT_FAILURE);
+
+  while (isspace ((unsigned char) *endptr)) endptr++;
+  if ((*endptr != '\0') || (parsed < INT_MIN) || (parsed > INT_MAX)) {
+    return (EXIT_FAILURE);
+  }
+
+  *value = (int) parsed;
+  return (EXIT_SUCCESS);
+}
+
+// Read a single line of text from a subtitle/text file.
+// The terminating line-feed is retained when one is present in the input.
+// Carriage returns are discarded so LF and CRLF input are handled identically.
+//
+// Returns:
+//   0  - line successfully read
+//  -1  - EOF encountered before any characters were read
+//  -2  - line is too long for the supplied buffer
+//  -3  - invalid arguments or input error
 int
 readline (FILE *fi, char *line, int limit) {
 
-  int i, n;
+  int ch, i;
 
-  i = 0;  // i is pointer to byte in line.
-  while (i < limit) {
+  if ((fi == NULL) || (line == NULL) || (limit < 2)) {
+    return (-3);
+  }
 
-    // Grab next byte from file.
-    n = fgetc (fi);
+  i = 0;
+  for (;;) {
+
+    ch = fgetc (fi);
 
     // End of file reached.
-    // Tell calling function, by returning -1, that we're at end of file, so it won't call readline() again.
-    if (n == EOF) {
+    if (ch == EOF) {
 
-      // If there's no end of line at the end of the file, ensure string termination.
-      if (i > 0) {
-        line[i] = 0;
-        return (0);
+      // File stream error encountered.
+      if (ferror (fi)) {
+        line[0] = '\0';
+        return (-3);
       }
-      return (-1);
-    }
 
-    // Found a carriage return. Ignore it.
-    if (n == '\r') {
-      continue;
-    }
+      // No characters were read for this line.
+      if (i == 0) {
+        line[0] = '\0';
+        return (-1);
+      }
 
-    // Seems to be a valid character. Keep it.
-    line[i] = n;
-    i++;
-
-    // Found a newline.
-    // Break out of loop since this is the end of the current line.
-    if (n == '\n') {
+      // Accept a final line that does not end with a line-feed.
+      line[i] = '\0';
       return (0);
     }
 
-  }
+    // Ignore carriage returns so CRLF input is treated as LF input.
+    if (ch == '\r') {
+      continue;
+    }
 
-  // Advance to next line.
-  n = 0;
-  while ((n != '\n') && (n != EOF)) {
-    n = fgetc (fi);
-  }
+    // Found a line-feed. Retain it because the subtitle tools use a line
+    // containing only '\n' to identify the blank line between subtitles.
+    if (ch == '\n') {
 
-  return (0);
+      // Line too long for supplied buffer.
+      if (i >= (limit - 1)) {
+        line[limit - 1] = '\0';
+        return (-2);
+      }
+
+      line[i++] = '\n';
+      line[i] = '\0';
+      return (0);
+    }
+
+    // Reserve one byte for the terminating null character. If the line is too
+    // long, discard the rest of the physical line so the next call starts at
+    // the beginning of the following line.
+    if (i >= (limit - 1)) {
+      line[limit - 1] = '\0';
+      while ((ch = fgetc (fi)) != '\n' && ch != EOF) {
+      }
+      if ((ch == EOF) && ferror (fi)) {
+        return (-3);
+      }
+      return (-2);
+    }
+
+    line[i++] = (char) ch;
+  }
 }
 
 // Detect Byte Order Mark (BOM), if it exists, at beginning of line.
@@ -379,22 +579,32 @@ readline (FILE *fi, char *line, int limit) {
 int
 byteordermark (char *text, BOM *bom) {
 
-  int type, i, found;
+  int type, i, found, best, bestlen;
 
-  // Loop through all types of Byte Order Marks.
+  if ((text == NULL) || (bom == NULL)) return (-1);
+
+  best = -1;
+  bestlen = 0;
+
+  // Keep the longest matching BOM because some shorter BOMs are prefixes of
+  // longer ones (for example, UTF-16 LE is a prefix of UTF-32 LE).
   for (type=0; type<MAXBOM; type++) {
 
-    found = 1;  // Default to current type detected.
+    found = 1;
     for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) found = 0;
+      if ((uint8_t) text[i] != bom[type].sequence[i]) {
+        found = 0;
+        break;
+      }
     }
 
-    // We found a match.
-    if (found) return (type);
+    if (found && (bom[type].len > bestlen)) {
+      best = type;
+      bestlen = bom[type].len;
+    }
   }
 
-  // Failed to find a match.
-  return (-1);
+  return (best);
 }
 
 // Extract and parse start and end timestamps.
@@ -402,73 +612,72 @@ byteordermark (char *text, BOM *bom) {
 int
 extract_time (char *text, TIME *start, TIME *end) {
 
-  int i, loc[8] = {0, 1, 3, 4, 6, 7, 9, 10};
-  char *temp;
+  size_t start_len, end_len, remaining;
+  char *temp, *arrow, *endtext;
 
-  // Allocate memory for various arrays.
-  temp = allocate_strmem (MAXLEN);
+  if ((text == NULL) || (start == NULL) || (end == NULL)) {
+    return (EXIT_FAILURE);
+  }
 
-  // Proper format
-  //           1         2         3         4         5         6         7         8
-  // 012345678901234567890123456789012345678901234567890123456789012345678901234567890
-  // 01:12:15,025 --> 01:12:17,645
-
-  // Note that sometimes srt files are of this (incorrect) form. This must be handled.
-  //           1         2         3         4         5         6         7         8
-  // 012345678901234567890123456789012345678901234567890123456789012345678901234567890
-  // 01:12:15,25 --> 01:12:17,645
-
-  // Starting timestamp.
-  memset (temp, 0, MAXLEN * sizeof (char));
-  memcpy (temp, text, 12 * sizeof (char));
-
-  // Check for fatal format errors.
-  if ((temp[2] != ':') || (temp[5] != ':') || (temp[8] != ',')) {
+  // Locate the separator instead of assuming a fixed offset. This preserves
+  // support for the occasionally encountered two-digit millisecond form.
+  arrow = strstr (text, " --> ");
+  if (arrow == NULL) {
     fprintf (stderr, "ERROR: Timestamp is malformed.\n");
-    fprintf (stderr, "       %s\n", text);
+    fprintf (stderr, "       %s", text);
     exit (EXIT_FAILURE);
   }
-  for (i=0; i<8; i++) {
-    if ((temp[loc[i]] < '0') || (temp[loc[i]] > '9')) {
-      fprintf (stderr, "ERROR: Timestamp is malformed.\n");
-      fprintf (stderr, "       %s\n", text);
-      exit (EXIT_FAILURE);
-    }
+
+  start_len = (size_t) (arrow - text);
+  if ((start_len != 11u) && (start_len != 12u)) {
+    fprintf (stderr, "ERROR: Starting timestamp is malformed.\n");
+    fprintf (stderr, "       %s", text);
+    exit (EXIT_FAILURE);
+  }
+  if (start_len == 11u) {
+    fprintf (stderr, "WARNING: Starting timestamp uses two millisecond digits.\n");
+    fprintf (stderr, "         %s", text);
   }
 
-  // Format appears ok, so parse timestamp.
+  temp = allocate_strmem (13);
+  memcpy (temp, text, start_len);
+  temp[start_len] = '\0';
   parsetimestamp (temp, start);
 
-  // Ending timestamp.
-  memset (temp, 0, MAXLEN * sizeof (char));
-  if (strncmp (&text[11], " --> ", 5) == 0) {
-    fprintf (stderr, "\nWARNING: Timestamp is malformed.\n");
-    fprintf (stderr, "         %s\n", text);
-    memcpy (temp, &text[16], 12 * sizeof (char));
-  } else {
-    memcpy (temp, &text[17], 12 * sizeof (char));
-  }
-
-  // Check for fatal format errors.
-  if ((temp[2] != ':') || (temp[5] != ':') || (temp[8] != ',')) {
-    fprintf (stderr, "\nERROR: Timestamp is malformed.\n");
-    fprintf (stderr, "       %s\n", text);
+  endtext = arrow + 5;
+  remaining = strlen (endtext);
+  if (remaining < 11u) {
+    fprintf (stderr, "ERROR: Ending timestamp is malformed.\n");
+    fprintf (stderr, "       %s", text);
+    free (temp);
     exit (EXIT_FAILURE);
   }
-  for (i=0; i<8; i++) {
-    if ((temp[loc[i]] < '0') || (temp[loc[i]] > '9')) {
-      fprintf (stderr, "\nERROR: Timestamp is malformed.\n");
-      fprintf (stderr, "       %s\n", text);
+
+  if (remaining >= 12u) {
+    if (isdigit ((unsigned char) endtext[11])) {
+      end_len = 12u;
+    } else if ((endtext[11] == '\n') || (endtext[11] == ' ')) {
+      end_len = 11u;
+      fprintf (stderr, "WARNING: Ending timestamp uses two millisecond digits.\n");
+      fprintf (stderr, "         %s", text);
+    } else {
+      fprintf (stderr, "ERROR: Ending timestamp is malformed.\n");
+      fprintf (stderr, "       %s", text);
+      free (temp);
       exit (EXIT_FAILURE);
     }
+  } else {
+    end_len = 11u;
+    fprintf (stderr, "WARNING: Ending timestamp uses two millisecond digits.\n");
+    fprintf (stderr, "         %s", text);
   }
 
-  // Format appears ok, so parse timestamp.
+  memset (temp, 0, 13u * sizeof (char));
+  memcpy (temp, endtext, end_len);
+  temp[end_len] = '\0';
   parsetimestamp (temp, end);
 
-  // Free allocated memory.
   free (temp);
-
   return (EXIT_SUCCESS);
 }
 
@@ -476,75 +685,63 @@ extract_time (char *text, TIME *start, TIME *end) {
 int
 parsetimestamp (char *timestamp, TIME *time) {
 
-  char *xx, *xxx, *endptr;
+  size_t len;
+  int i;
+  const int loc[8] = {0, 1, 3, 4, 6, 7, 9, 10};
 
-  // Allocate memory for various arrays.
-  xx = allocate_strmem (3);
-  xxx = allocate_strmem (4);
+  if ((timestamp == NULL) || (time == NULL)) return (EXIT_FAILURE);
 
-  // Hours
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, timestamp, 2);
-  errno = 0;
-  time->h = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "\nERROR: Cannot make integer of hours: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
-    exit (EXIT_FAILURE); 
-  }
-
-  // Minutes
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, &timestamp[3], 2);
-  errno = 0;
-  time->m = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "\nERROR: Cannot make integer of minutes: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
+  len = strlen (timestamp);
+  if ((len != 11u) && (len != 12u)) {
+    fprintf (stderr, "ERROR: Timestamp is malformed: %s\n", timestamp);
     exit (EXIT_FAILURE);
   }
 
-  // Seconds
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, &timestamp[6], 2);
-  errno = 0;
-  time->s = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "\nERROR: Cannot make integer of seconds: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
+  if ((timestamp[2] != ':') || (timestamp[5] != ':') || (timestamp[8] != ',')) {
+    fprintf (stderr, "ERROR: Timestamp is malformed: %s\n", timestamp);
     exit (EXIT_FAILURE);
   }
 
-  // Milliseconds
-  memset (xxx, 0, 4 * sizeof (char));
-  strncpy (xxx, &timestamp[9], 3);
-  errno = 0;
-  time->ms = (int) strtol (xxx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xxx)) {
-    fprintf (stderr, "\nERROR: Cannot make integer of milliseconds: %s\n", xxx);
-    fprintf (stderr, "       %s\n", timestamp);
+  for (i=0; i<8; i++) {
+    if (!isdigit ((unsigned char) timestamp[loc[i]])) {
+      fprintf (stderr, "ERROR: Timestamp is malformed: %s\n", timestamp);
+      exit (EXIT_FAILURE);
+    }
+  }
+  if ((len == 12u) && !isdigit ((unsigned char) timestamp[11])) {
+    fprintf (stderr, "ERROR: Timestamp is malformed: %s\n", timestamp);
     exit (EXIT_FAILURE);
   }
 
-  // Total milliseconds.
-  timetoms (time);
+  time->h = ((timestamp[0] - '0') * 10) + (timestamp[1] - '0');
+  time->m = ((timestamp[3] - '0') * 10) + (timestamp[4] - '0');
+  time->s = ((timestamp[6] - '0') * 10) + (timestamp[7] - '0');
+  time->ms = ((timestamp[9] - '0') * 10) + (timestamp[10] - '0');
+  if (len == 12u) time->ms = (time->ms * 10) + (timestamp[11] - '0');
 
-  // Free allocated memory.
-  free (xx);
-  free (xxx);
+  if ((time->m < 0) || (time->m > 59)) {
+    fprintf (stderr, "ERROR: Minutes are outside valid range 00-59: %s\n", timestamp);
+    exit (EXIT_FAILURE);
+  }
+  if ((time->s < 0) || (time->s > 59)) {
+    fprintf (stderr, "ERROR: Seconds are outside valid range 00-59: %s\n", timestamp);
+    exit (EXIT_FAILURE);
+  }
 
-  return (EXIT_SUCCESS);
+  return (timetoms (time));
 }
 
 // Calculate totalms from h, m, s, ms in TIME struct.
 int
 timetoms (TIME *time) {
 
-  time->totalms = time->h * 60 * 60 * 1000;
-  time->totalms += time->m * 60 * 1000;
-  time->totalms += time->s * 1000;
-  time->totalms += time->ms;
-    
+  if (time == NULL) return (EXIT_FAILURE);
+
+  time->totalms = (int64_t) time->h * 60 * 60 * 1000;
+  time->totalms += (int64_t) time->m * 60 * 1000;
+  time->totalms += (int64_t) time->s * 1000;
+  time->totalms += (int64_t) time->ms;
+
   return (EXIT_SUCCESS);
 }
 
@@ -552,20 +749,22 @@ timetoms (TIME *time) {
 int
 mstotime (TIME *time) {
 
-  int64_t totalms;
+  int64_t totalms, hours;
+
+  if ((time == NULL) || (time->totalms < 0)) return (EXIT_FAILURE);
 
   totalms = time->totalms;
 
-  time->h = (int) (totalms / (60 * 60 * 1000));
-  totalms -= (time->h * 60 * 60 * 1000);
+  hours = totalms / INT64_C (3600000);
+  if (hours > INT_MAX) return (EXIT_FAILURE);
+  time->h = (int) hours;
+  totalms %= INT64_C (3600000);
 
-  time->m = (int) (totalms / (60 * 1000));
-  totalms -= (time->m * 60 * 1000);
+  time->m = (int) (totalms / INT64_C (60000));
+  totalms %= INT64_C (60000);
 
-  time->s = (int) (totalms / 1000);
-  totalms -= (time->s * 1000);
-
-  time->ms = totalms;
+  time->s = (int) (totalms / INT64_C (1000));
+  time->ms = (int) (totalms % INT64_C (1000));
 
   return (EXIT_SUCCESS);
 }
@@ -581,9 +780,8 @@ allocate_strmem (int len) {
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
+  tmp = calloc ((size_t) len, sizeof (char));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
@@ -602,9 +800,8 @@ allocate_strmemp (int len) {
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char **) malloc (len * sizeof (char *));
+  tmp = calloc ((size_t) len, sizeof (char *));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char *));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmemp().\n");
@@ -623,9 +820,8 @@ allocate_intmem (int len) {
     exit (EXIT_FAILURE);
   }
 
-  tmp = (int *) malloc (len * sizeof (int));
+  tmp = calloc ((size_t) len, sizeof (int));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (int));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_intmem().\n");
@@ -644,9 +840,8 @@ allocate_bommem (int len) {
     exit (EXIT_FAILURE);
   }
 
-  tmp = (BOM *) malloc (len * sizeof (BOM));
+  tmp = calloc ((size_t) len, sizeof (BOM));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (BOM));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_bommem().\n");

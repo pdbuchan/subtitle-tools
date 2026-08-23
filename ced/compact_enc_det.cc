@@ -1895,6 +1895,7 @@ int ApplyDefaultHint(const CompactEncDet::TextCorpusType corpus_type,
   break;
   case CompactEncDet::QUERY_CORPUS:
   case CompactEncDet::EMAIL_CORPUS:
+  case CompactEncDet::NUM_CORPA:  // Sentinel value; no corpus-specific boost.
   default:
     break;
   }
@@ -2600,6 +2601,8 @@ void UTF1632BoostWhack(DetectEncodingState* destatep, int offset, uint8 byte1) {
       Boost(destatep, F_UTF_32LE, kSmallInitDiff);        // Good pair
       break;
     case 3:         // ambiguous
+      break;
+    default:        // Unreachable because (offset & 3) is always 0...3.
       break;
     }
   } else {              // We have ffff
@@ -4216,6 +4219,8 @@ void BoostPrune(const uint8* src, DetectEncodingState* destatep,
         destatep->top_rankedencoding = F_CP874;
         Boost(destatep, F_CP874, kBoostOnePair * 2);
         break;
+      default:
+        break;
       }
     } else {
       switch (destatep->top_rankedencoding) {
@@ -4250,6 +4255,8 @@ void BoostPrune(const uint8* src, DetectEncodingState* destatep,
       case F_CP874:         // ISO-8859-11
         destatep->top_rankedencoding = F_ISO_8859_11;
         Boost(destatep, F_ISO_8859_11, kBoostOnePair * 2);
+        break;
+      default:
         break;
       }
     }

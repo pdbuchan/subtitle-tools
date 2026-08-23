@@ -72,25 +72,25 @@ write_bmp (SUB *sub) {
     exit (EXIT_FAILURE);
   }
 
-  // BMP file header.
-  write_u16_le (fo2, 0x4d42);
-  write_u32_le (fo2, 54u + (uint32_t) image_size);
-  write_u16_le (fo2, 0);
-  write_u16_le (fo2, 0);
-  write_u32_le (fo2, 54);
+  // BMP file header
+  write_u16_le (fo, 0x4d42);                // File type, should be "BM"
+  write_u32_le (fo, 54u + (uint32_t) image_size);  // Size of the file (bytes)
+  write_u16_le (fo, 0);                     // Reserved (set to 0)
+  write_u16_le (fo, 0);                     // Reserved (set to 0)
+  write_u32_le (fo, 54);                    // Offset (bytes) to the start of the pixel data
 
-  // BMP information header.
-  write_u32_le (fo2, 40);
-  write_s32_le (fo2, (int32_t) width);
-  write_s32_le (fo2, (int32_t) height);
-  write_u16_le (fo2, 1);
-  write_u16_le (fo2, 24);
-  write_u32_le (fo2, 0);
-  write_u32_le (fo2, (uint32_t) image_size);
-  write_s32_le (fo2, 7874);
-  write_s32_le (fo2, 7874);
-  write_u32_le (fo2, 0);
-  write_u32_le (fo2, 0);
+  // BMP information header
+  write_u32_le (fo, 40);                    // Size of this header (40 bytes)
+  write_s32_le (fo, (int32_t) width);       // Width of the image (px)
+  write_s32_le (fo, (int32_t) height);      // Height of the image (px)
+  write_u16_le (fo, 1);                     // Number of color planes (always 1)
+  write_u16_le (fo, 24);                    // Bits per pixel (24 for RGB)
+  write_u32_le (fo, 0);                     // Compression method (0 for none)
+  write_u32_le (fo, (uint32_t) image_size);  // Size of the image data (bytes)
+  write_s32_le (fo, 7874);                  // Horizontal resolution (in pixels per meter) (200 DPI)
+  write_s32_le (fo, 7874);                  // Vertical resolution (in pixels per meter) (200 DPI)
+  write_u32_le (fo, 0);                     // Number of colors used (0 for 2^24)
+  write_u32_le (fo, 0);                     // Important colors (0 for all)
 
   // Write pixels. BMP rows are bottom-up and use BGR order.
   for (y = 0; y < height; y++) {

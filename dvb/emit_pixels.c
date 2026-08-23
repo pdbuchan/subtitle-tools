@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,59 +16,46 @@
 
 #include "dvb.h"
 
-// Add pixel(s) to the object's buffer as CLUT entry(s).
+// Add the pixels represented by one decoded RLE command to an object's
+// CLUT-entry buffer. parse_ods() calls this only during its second pass,
+// after the final object width and height have already been established.
 int
-emit_pixels (STATE *state, PAGE **page, RLE *rle, size_t *x, size_t y) {
+emit_pixels (PAGE **page, size_t page_idx, size_t object_idx, RLE *rle, size_t *x, size_t y) {
 
-  int temp;
-  size_t i, page_idx, object_idx, stride, buffer_idx;
+  OBJECT *object;
+  size_t i, n, index;
 
-  // Retrieve page index from state->page_id.
-  temp = find_page_index (state, *page, state->page_id);
-  if (temp < 0) {
-    fprintf (stderr, "Cannot find page index from state->page_id in emit_pixels()\n");
-    fprintf (stderr, "page_id: 0x%04x\n", state->page_id);
-    exit (EXIT_FAILURE);
-  } else {
-    page_idx = (size_t) temp;
+  object = &(*page)[page_idx].object[object_idx];
+
+  // Most commands specify an explicit run length. Two special DVB RLE
+  // commands instead request one or two pixels having CLUT entry 0.
+  n = rle->runlength;
+  if (rle->emit_one_00_pixel) n = 1;
+  if (rle->emit_two_00_pixels) n = 2;
+
+  // A zero-length command is an end-of-string indication and emits no pixel.
+  if (n == 0) return (EXIT_SUCCESS);
+
+  // Width and height are fixed by the first ODS pass. These checks also
+  // protect the multiplication used to form a linear buffer index.
+  if (*x > object->width || n > object->width - *x) return (EXIT_FAILURE);
+  if (y >= object->height || object->width > IMG_PIXEL_COUNT / object->height) {
+    return (EXIT_FAILURE);
   }
 
-  // Retrieve object index from state->object_id.
-  temp = find_object_index (state, *page, state->object_id);
-  if (temp < 0) {
-    fprintf (stderr, "Cannot find object index from state->object_id in emit_pixels().\n");
-    fprintf (stderr, "page_id: 0x%04x, object_id: 0x%04x\n", state->page_id, state->object_id);
-    exit (EXIT_FAILURE);
-  } else {
-    object_idx = temp;
+  index = y * object->width + *x;
+  if (index > IMG_PIXEL_COUNT || n > IMG_PIXEL_COUNT - index) {
+    return (EXIT_FAILURE);
   }
 
-  // Line width of buffer; 0 for 1st line until object width is known.
-  stride = (*page)[page_idx].object[object_idx].width;
-
-  // Emit one pixel with color 0x00.
-  if (rle->emit_one_00_pixel) {
-    buffer_idx = (y * stride) + (*x);
-    (*page)[page_idx].object[object_idx].buffer[buffer_idx] = rle->color;
-    (*x)++;
-
-  // Emit two pixels with color 0x00.
-  } else if (rle->emit_two_00_pixels) {
-    buffer_idx = (y * stride) + (*x);
-    (*page)[page_idx].object[object_idx].buffer[buffer_idx] = rle->color;
-    (*x)++;
-    buffer_idx = (y * stride) + (*x);
-    (*page)[page_idx].object[object_idx].buffer[buffer_idx] = rle->color;
-    (*x)++;
-
-  // Emit pixels according to RLE.
-  } else {
-    for (i = 0; i < rle->runlength; i++) {
-      buffer_idx = (y * stride) + (*x);
-      (*page)[page_idx].object[object_idx].buffer[buffer_idx] = rle->color;
-      (*x)++;
-    }
+  // Mark each emitted pixel as coded. A DVB object may have a ragged right
+  // edge; pixels beyond the end of a shorter code string are not background
+  // pixels and must leave the underlying region unchanged during composition.
+  for (i = 0; i < n; i++) {
+    object->buffer[index + i] = rle->color;
+    object->coded[index + i] = 1;
   }
+  *x += n;
 
   return (EXIT_SUCCESS);
 }

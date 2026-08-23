@@ -1,4 +1,4 @@
-/*  Copyright (C) 2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2025-2026 P. David Buchan (pdbuchan@gmail.com)
   
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -16,7 +16,7 @@
 
 // time-diff.c - Given two timestamps from standard input, calculate the time difference and output as a timestamp.
 
-// gcc -Wall time-diff.c -o time-diff
+// gcc -std=c11 -Wall -Wextra -Wpedantic time-diff.c -o time-diff
 
 // Run without command line arguments.
 // Input: starting timestamp, ending timestamp
@@ -24,9 +24,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>  // uint8_t
+#include <stdint.h>
 #include <string.h>
-#include <errno.h>
+#include <limits.h>
 
 typedef struct {
   int h;
@@ -38,44 +38,40 @@ typedef struct {
 
 // Function prototypes
 int inputtext (char *);
-int parsetimestamp (char *, TIME *);
+int parsetimestamp (const char *, TIME *);
 int timetoms (TIME *);
 int mstotime (TIME *);
-char *allocate_strmem (int);
 
 // Set some symbolic constants.
 #define MAXLEN 256  // Maximum number of characters per line
+#define TIMESTAMP_LEN 12  // Length of hh:mm:ss.xxx or hh:mm:ss,xxx
 
 int
-main (int argc, char **argv) {
+main (void) {
 
-  char *timestamp;
+  char timestamp[MAXLEN];
   TIME start, end, diff;
-
-  // Allocate memory for various arrays.
-  timestamp = allocate_strmem (MAXLEN);
 
   // Ask for starting timestamp.
   fprintf (stdout, "\nStarting timestamp (hh:mm:ss.xxx or hh:mm:ss,xxx)? ");
-  memset (timestamp, 0, MAXLEN * sizeof (char));
   inputtext (timestamp);
   parsetimestamp (timestamp, &start);
 
   // Ask for ending timestamp.
   fprintf (stdout, "Ending timestamp (hh:mm:ss.xxx or hh:mm:ss,xxx)? ");
-  memset (timestamp, 0, MAXLEN * sizeof (char));
   inputtext (timestamp);
   parsetimestamp (timestamp, &end);
 
-  // Calcalate difference and express as a timestamp.
+  // Calculate difference and express as a timestamp.
+  if (end.totalms < start.totalms) {
+    fprintf (stderr, "ERROR: Ending timestamp must not be earlier than starting timestamp.\n");
+    return (EXIT_FAILURE);
+  }
   diff.totalms = end.totalms - start.totalms;
   mstotime (&diff);
 
   // Show difference on standard output.
   fprintf (stdout, "Difference is (hh:mm:ss.ms): %02i:%02i:%02i.%03i\n\n", diff.h, diff.m, diff.s, diff.ms);
-
-  // Free allocated memory.
-  free (timestamp);
 
   return (EXIT_SUCCESS);
 }
@@ -84,77 +80,108 @@ main (int argc, char **argv) {
 int
 inputtext (char *text) {
 
-  // Request new text from standard input.
-  fgets (text, MAXLEN, stdin);
+  int ch;
+  size_t len;
 
-  // Remove trailing newline, if there.
-  if ((strnlen(text, MAXLEN) > 0) && (text[strnlen (text, MAXLEN) - 1] == '\n')) {
-    text[strnlen (text, MAXLEN) - 1] = '\0';  // Replace newline with string termination.
+  if (text == NULL) {
+    fprintf (stderr, "ERROR: Invalid text buffer in inputtext().\n");
+    exit (EXIT_FAILURE);
+  }
+
+  if (fgets (text, MAXLEN, stdin) == NULL) {
+    fprintf (stderr, "ERROR: Unable to read text from standard input.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  len = strlen (text);
+
+  // Remove trailing newline, and a preceding carriage return if present.
+  if ((len > 0u) && (text[len - 1u] == '\n')) {
+    text[--len] = '\0';
+    if ((len > 0u) && (text[len - 1u] == '\r')) {
+      text[--len] = '\0';
+    }
+    return (EXIT_SUCCESS);
+  }
+
+  // If the buffer is full, determine whether the input was exactly
+  // MAXLEN - 1 characters or was genuinely too long.
+  if (len == (MAXLEN - 1u)) {
+
+    ch = getchar ();
+
+    // Exactly MAXLEN - 1 characters followed by newline or EOF.
+    if ((ch == '\n') || (ch == EOF)) {
+      return (EXIT_SUCCESS);
+    }
+
+    // Handle CRLF after an exactly full input line.
+    if (ch == '\r') {
+      ch = getchar ();
+      if ((ch == '\n') || (ch == EOF)) {
+        return (EXIT_SUCCESS);
+      }
+    }
+
+    // Discard the remainder of an overlong input line.
+    while ((ch != '\n') && (ch != EOF)) {
+      ch = getchar ();
+    }
+
+    fprintf (stderr, "ERROR: Input text is too long; maximum is %d characters.\n", MAXLEN - 1);
+    exit (EXIT_FAILURE);
   }
 
   return (EXIT_SUCCESS);
 }
 
-// Parse timestamp into TIME struct, and also return total time in milliseconds.
+// Parse timestamp into TIME struct, and also calculate total time in milliseconds.
+// Accepted forms are exactly hh:mm:ss.xxx and hh:mm:ss,xxx.
 int
-parsetimestamp (char *timestamp, TIME *time) {
+parsetimestamp (const char *timestamp, TIME *time) {
 
-  char *xx, *xxx, *endptr;
+  size_t i, len;
+  static const size_t digitpos[] = {0u, 1u, 3u, 4u, 6u, 7u, 9u, 10u, 11u};
 
-  // Allocate memory for various arrays.
-  xx = allocate_strmem (3);
-  xxx = allocate_strmem (4);
-
-  // Hours
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, timestamp, 2);
-  errno = 0;
-  time->h = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "ERROR: Cannot make integer of hours: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
-    exit (EXIT_FAILURE); 
-  }
-
-  // Minutes
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, &timestamp[3], 2);
-  errno = 0;
-  time->m = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "ERROR: Cannot make integer of minutes: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
+  if ((timestamp == NULL) || (time == NULL)) {
+    fprintf (stderr, "ERROR: Invalid argument to parsetimestamp().\n");
     exit (EXIT_FAILURE);
   }
 
-  // Seconds
-  memset (xx, 0, 3 * sizeof (char));
-  strncpy (xx, &timestamp[6], 2);
-  errno = 0;
-  time->s = (int) strtol (xx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
-    fprintf (stderr, "ERROR: Cannot make integer of seconds: %s\n", xx);
-    fprintf (stderr, "       %s\n", timestamp);
+  len = strlen (timestamp);
+  if (len != TIMESTAMP_LEN) {
+    fprintf (stderr, "ERROR: Timestamp must have form hh:mm:ss.xxx or hh:mm:ss,xxx: %s\n", timestamp);
     exit (EXIT_FAILURE);
   }
 
-  // Milliseconds
-  memset (xxx, 0, 4 * sizeof (char));
-  strncpy (xxx, &timestamp[9], 3);
-  errno = 0;
-  time->ms = (int) strtol (xxx, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xxx)) {
-    fprintf (stderr, "ERROR: Cannot make integer of milliseconds: %s\n", xxx);
-    fprintf (stderr, "       %s\n", timestamp);
+  if ((timestamp[2] != ':') || (timestamp[5] != ':') ||
+      ((timestamp[8] != '.') && (timestamp[8] != ','))) {
+    fprintf (stderr, "ERROR: Timestamp is malformed: %s\n", timestamp);
     exit (EXIT_FAILURE);
   }
 
-  // Total milliseconds.
+  for (i=0u; i<(sizeof (digitpos) / sizeof (digitpos[0])); i++) {
+    if ((timestamp[digitpos[i]] < '0') || (timestamp[digitpos[i]] > '9')) {
+      fprintf (stderr, "ERROR: Timestamp is malformed: %s\n", timestamp);
+      exit (EXIT_FAILURE);
+    }
+  }
+
+  time->h = ((timestamp[0] - '0') * 10) + (timestamp[1] - '0');
+  time->m = ((timestamp[3] - '0') * 10) + (timestamp[4] - '0');
+  time->s = ((timestamp[6] - '0') * 10) + (timestamp[7] - '0');
+  time->ms = ((timestamp[9] - '0') * 100) + ((timestamp[10] - '0') * 10) + (timestamp[11] - '0');
+
+  if (time->m > 59) {
+    fprintf (stderr, "ERROR: Timestamp minutes must be in range 00-59: %s\n", timestamp);
+    exit (EXIT_FAILURE);
+  }
+  if (time->s > 59) {
+    fprintf (stderr, "ERROR: Timestamp seconds must be in range 00-59: %s\n", timestamp);
+    exit (EXIT_FAILURE);
+  }
+
   timetoms (time);
-
-  // Free allocated memory.
-  free (xx);
-  free (xxx);
 
   return (EXIT_SUCCESS);
 }
@@ -163,10 +190,15 @@ parsetimestamp (char *timestamp, TIME *time) {
 int
 timetoms (TIME *time) {
 
-  time->totalms = time->h * 60 * 60 * 1000;
-  time->totalms += time->m * 60 * 1000;
-  time->totalms += time->s * 1000;
-  time->totalms += time->ms;
+  if (time == NULL) {
+    fprintf (stderr, "ERROR: Invalid TIME pointer in timetoms().\n");
+    exit (EXIT_FAILURE);
+  }
+
+  time->totalms = (int64_t) time->h * INT64_C(60) * INT64_C(60) * INT64_C(1000);
+  time->totalms += (int64_t) time->m * INT64_C(60) * INT64_C(1000);
+  time->totalms += (int64_t) time->s * INT64_C(1000);
+  time->totalms += (int64_t) time->ms;
 
   return (EXIT_SUCCESS);
 }
@@ -175,41 +207,34 @@ timetoms (TIME *time) {
 int
 mstotime (TIME *time) {
 
-  int64_t totalms;
+  int64_t hours, totalms;
+
+  if (time == NULL) {
+    fprintf (stderr, "ERROR: Invalid TIME pointer in mstotime().\n");
+    exit (EXIT_FAILURE);
+  }
+  if (time->totalms < 0) {
+    fprintf (stderr, "ERROR: Negative timestamp cannot be converted.\n");
+    exit (EXIT_FAILURE);
+  }
 
   totalms = time->totalms;
 
-  time->h = (int) (totalms / (60 * 60 * 1000));
-  totalms -= (time->h * 60 * 60 * 1000);
+  hours = totalms / (INT64_C(60) * INT64_C(60) * INT64_C(1000));
+  if (hours > INT_MAX) {
+    fprintf (stderr, "ERROR: Timestamp hours exceed supported range.\n");
+    exit (EXIT_FAILURE);
+  }
+  time->h = (int) hours;
+  totalms -= hours * INT64_C(60) * INT64_C(60) * INT64_C(1000);
 
-  time->m = (int) (totalms / (60 * 1000));
-  totalms -= (time->m * 60 * 1000);
+  time->m = (int) (totalms / (INT64_C(60) * INT64_C(1000)));
+  totalms -= (int64_t) time->m * INT64_C(60) * INT64_C(1000);
 
-  time->s = (int) (totalms / 1000);
-  totalms -= (time->s * 1000);
+  time->s = (int) (totalms / INT64_C(1000));
+  totalms -= (int64_t) time->s * INT64_C(1000);
 
-  time->ms = totalms;
+  time->ms = (int) totalms;
 
   return (EXIT_SUCCESS);
-}
-
-// Allocate memory for an array of chars.
-char *
-allocate_strmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
-    exit (EXIT_FAILURE);
-  }
 }

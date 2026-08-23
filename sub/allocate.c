@@ -16,128 +16,46 @@
 
 #include "sub.h"
 
-// Allocate memory for an array of uint8_t.
+static void *
+allocate_zeroed (size_t len, size_t element_size, const char *where) {
+
+  void *tmp;
+
+  if (len == 0 || element_size == 0 || len > SIZE_MAX / element_size) {
+    fprintf (stderr, "Invalid allocation size in %s().\n", where);
+    exit (EXIT_FAILURE);
+  }
+
+  tmp = calloc (len, element_size);
+  if (tmp == NULL) {
+    fprintf (stderr, "Cannot allocate memory in %s().\n", where);
+    exit (EXIT_FAILURE);
+  }
+
+  return (tmp);
+}
+
 uint8_t *
-allocate_u8mem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_u8mem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (uint8_t *) malloc (len * sizeof (uint8_t));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (uint8_t));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_ustrmem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_u8mem (size_t len) {
+  return allocate_zeroed (len, sizeof (uint8_t), "allocate_u8mem");
 }
 
-// Allocate memory for an array of chars.
 char *
-allocate_strmem (int len) {
-
-  void *tmp;
-  
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_strmem().\n", len);
-    exit (EXIT_FAILURE);
-  } 
-    
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_strmem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_strmem (size_t len) {
+  return allocate_zeroed (len, sizeof (char), "allocate_strmem");
 }
-  
-// Allocate memory for an array of pointers to arrays of chars.
+
 char **
-allocate_strmemp (int len) {
-
-  void *tmp;
-  
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_strmemp().\n", len);
-    exit (EXIT_FAILURE);
-  } 
-    
-  tmp = (char **) malloc (len * sizeof (char *));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char *));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_strmemp().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_strmemp (size_t len) {
+  return allocate_zeroed (len, sizeof (char *), "allocate_strmemp");
 }
 
-// Allocate memory for an array of size_t's.
 size_t *
-allocate_sizetmem (int len) {
-  
-  void *tmp; 
-  
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_sizetmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-  
-  tmp = (size_t *) malloc (len * sizeof (size_t));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (size_t));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_sizetmem().\n");
-    exit (EXIT_FAILURE);
-  }
-} 
-  
-// Allocate memory for an array of pointers to arrays of size_t's. 
-size_t **
-allocate_sizetmemp (int len) { 
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_sizetmemp().\n", len);
-    exit (EXIT_FAILURE);
-  }
-  
-  tmp = (size_t **) malloc (len * sizeof (size_t *));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (size_t *));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_sizetmemp().\n");
-    exit (EXIT_FAILURE);
-  } 
+allocate_sizetmem (size_t len) {
+  return allocate_zeroed (len, sizeof (size_t), "allocate_sizetmem");
 }
 
-// Allocate memory for an array of CHANGE structs.
-CHANGE *
-allocate_changemem (int len) {
-  
-  void *tmp; 
-
-  if (len <= 0) {
-    fprintf (stderr, "Cannot allocate memory because len = %d in allocate_changemem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (CHANGE *) malloc (len * sizeof (CHANGE));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (CHANGE));
-    return (tmp);
-  } else {
-    fprintf (stderr, "Cannot allocate memory for array in allocate_chagemem().\n");
-    exit (EXIT_FAILURE);
-  }
+size_t **
+allocate_sizetmemp (size_t len) {
+  return allocate_zeroed (len, sizeof (size_t *), "allocate_sizetmemp");
 }

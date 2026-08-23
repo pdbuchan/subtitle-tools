@@ -1,10 +1,10 @@
-/*  Copyright (C) 2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2025-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    
+
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,182 +16,190 @@
 
 // writebom.c - Prepend a Byte Order Mark (BOM) to a text file.
 
-// gcc -Wall writebom.c -o writebom
+// gcc -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2 writebom.c -o writebom
 
 // Run without command line arguments to see usage notes.
 // Output: out.txt
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>  // uint8_t
+#include <stdint.h>
 #include <string.h>
 #include <errno.h>
-
-// Definition of structs
-typedef struct {
-  int len;
-  char *name;
-  uint8_t *sequence;
-} BOM;
-
-// Function prototypes
-int inputtext (char *);
-int byteordermark (uint8_t *, BOM *);
-char *allocate_strmem (int);
-uint8_t *allocate_ustrmem (int);
-BOM *allocate_bommem (int);
+#include <ctype.h>
 
 // Set some symbolic constants.
-#define MAXLEN 256  // Maximum number of characters per line
-#define MAXLINES 10  // Maximum number of lines of text per subtitle
-#define MAXBOM 11  // Maximum number of Byte Order Mark (BOM) types
+#define MAX_STRINGLEN 256  // Maximum number of characters read from standard input
+#define MAXBOM 11          // Number of recognized Byte Order Mark (BOM) types
+#define MAX_BOM_BYTES 4    // Maximum number of bytes in a recognized BOM
+#define COPY_BUFSIZE 8192  // Buffer size used when copying the input file
+
+// Definition of structs.
+typedef struct {
+  size_t len;
+  const char *name;
+  const uint8_t *sequence;
+} BOM;
+
+// Function prototypes.
+int inputtext (char *);
+int parse_choice (const char *, int *);
+int byteordermark (const uint8_t *, size_t, const BOM *);
+int copy_stream (FILE *, FILE *);
+
+// Byte Order Mark (BOM) sequences.
+static const uint8_t utf8[]      = {0xef, 0xbb, 0xbf};
+static const uint8_t utf16be[]   = {0xfe, 0xff};
+static const uint8_t utf16le[]   = {0xff, 0xfe};
+static const uint8_t utf32be[]   = {0x00, 0x00, 0xfe, 0xff};
+static const uint8_t utf32le[]   = {0xff, 0xfe, 0x00, 0x00};
+static const uint8_t utf7[]      = {0x2b, 0x2f, 0x76};
+static const uint8_t utf1[]      = {0xf7, 0x64, 0x4c};
+static const uint8_t utfebcdic[] = {0xdd, 0x73, 0x66, 0x73};
+static const uint8_t scsu[]      = {0x0e, 0xfe, 0xff};
+static const uint8_t bocu1[]     = {0xfb, 0xee, 0x28};
+static const uint8_t gb18030[]   = {0x84, 0x31, 0x95, 0x33};
+
+// Table of recognized Byte Order Marks.
+static const BOM bom[MAXBOM] = {
+  {sizeof (utf8),      "UTF-8",        utf8},
+  {sizeof (utf16be),   "UTF-16 (BE)",  utf16be},
+  {sizeof (utf16le),   "UTF-16 (LE)",  utf16le},
+  {sizeof (utf32be),   "UTF-32 (BE)",  utf32be},
+  {sizeof (utf32le),   "UTF-32 (LE)",  utf32le},
+  {sizeof (utf7),      "UTF-7",        utf7},
+  {sizeof (utf1),      "UTF-1",        utf1},
+  {sizeof (utfebcdic), "UTF-EBCDIC",   utfebcdic},
+  {sizeof (scsu),      "SCSU",         scsu},
+  {sizeof (bocu1),     "BOCU-1",       bocu1},
+  {sizeof (gb18030),   "GB18030",      gb18030}
+};
 
 int
 main (int argc, char **argv) {
 
-  int i, type, choice, nbytes;
-  char *filename, *temp, *endptr;
-  uint8_t *input;
-  BOM *bom;
+  int i, type, choice, status;
+  char temp[MAX_STRINGLEN];
+  uint8_t input[MAX_BOM_BYTES];
+  size_t nread;
+  const char *filename;
   FILE *fi, *fo;
-
-  // Byte Order Mark (BOM) names and sequences.
-  char name[MAXBOM][30] = {"UTF-8", "UTF-16 (BE)", "UTF-16 (LE)", "UTF-32 (BE)", "UTF-32 (LE)", "UTF-7", "UTF-1", "UTF-EBCDIC", "SCSU", "BOCU-1", "GB18030"};
-  uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
-  uint8_t utf16be[2]    = {0xfe, 0xff};
-  uint8_t utf16le[2]    = {0xff, 0xfe};
-  uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
-  uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
-  uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
-  uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
-  uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
-  uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
-  uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
-  uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
-
-  // Allocate memory for various arrays.
-  filename = allocate_strmem (MAXLEN);
 
   // Process the command line arguments, if any.
   if (argc == 2) {
-    strncpy (filename, argv[1], MAXLEN);
-  
+    filename = argv[1];
   } else {
     fprintf (stdout, "\nUsage: ./writebom inputfilename\n");
     fprintf (stdout, "       Output will be out.txt\n\n");
-    free (filename);
     return (EXIT_SUCCESS);
   }
 
-  // Allocate memory for various arrays.
-  temp = allocate_strmem (MAXLEN);
-  input = allocate_ustrmem (4);
-  bom = allocate_bommem (MAXBOM);
-
-  // Populate array with Byte Order Mark data.
-  bom[0].len = 3;    bom[0].name = name[0];    bom[0].sequence = utf8;
-  bom[1].len = 2;    bom[1].name = name[1];    bom[1].sequence = utf16be;
-  bom[2].len = 2;    bom[2].name = name[2];    bom[2].sequence = utf16le;
-  bom[3].len = 4;    bom[3].name = name[3];    bom[3].sequence = utf32be;
-  bom[4].len = 4;    bom[4].name = name[4];    bom[4].sequence = utf32le;
-  bom[5].len = 3;    bom[5].name = name[5];    bom[5].sequence = utf7;
-  bom[6].len = 3;    bom[6].name = name[6];    bom[6].sequence = utf1;
-  bom[7].len = 4;    bom[7].name = name[7];    bom[7].sequence = utfebcdic;
-  bom[8].len = 3;    bom[8].name = name[8];    bom[8].sequence = scsu;
-  bom[9].len = 3;    bom[9].name = name[9];    bom[9].sequence = bocu1;
-  bom[10].len = 4;   bom[10].name = name[10];  bom[10].sequence = gb18030;
-
+  // Ask which BOM should be prepended if the input does not already have one.
   fprintf (stdout, "\nChoose Byte Order Mark (BOM) to apply to file %s:\n\n", filename);
-  for (i=0; i<MAXBOM; i++) {
-    fprintf (stdout, "%i = %s\n", i + 1, name[i]);
+  for (i = 0; i < MAXBOM; i++) {
+    fprintf (stdout, "%i = %s\n", i + 1, bom[i].name);
   }
+
   fprintf (stdout, "\nChoice? ");
-  memset (temp, 0, MAXLEN * sizeof (char));
+  memset (temp, 0, sizeof (temp));
   inputtext (temp);
-  errno = 0;
-  choice = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == temp)) {
-    fprintf (stderr, "ERROR: Cannot make integer of: %s\n", temp);
-    exit (EXIT_FAILURE);
-  }
-  if ((choice < 1) || (choice >= MAXBOM)) {
-    fprintf (stderr, "Invalid choice.\n\n");
-    exit (EXIT_FAILURE);
+  if (parse_choice (temp, &choice) != EXIT_SUCCESS) {
+    return (EXIT_FAILURE);
   }
 
   fprintf (stdout, "\nInput file: %s\n", filename);
 
-  // Open input file.
+  // Open the input file in binary mode so its bytes are copied unchanged.
   fi = fopen (filename, "rb");
   if (fi == NULL) {
     fprintf (stderr, "\nERROR: Unable to open input file %s.\n", filename);
-    exit (EXIT_FAILURE);
+    return (EXIT_FAILURE);
   }
 
-  // Count bytes in file.
-  nbytes = 0;
-  while (fgetc (fi) != EOF) {
-    nbytes++;
-  }
-  rewind (fi);
-
-  // Stop if less than 4 bytes in file.
-  if (nbytes < 4) {
-    fprintf (stderr, "ERROR: There are less than 4 bytes in input file %s.\n", filename);
-    fprintf (stderr, "       No action taken.\n\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Read first four bytes of file.
-  for (i=0; i<4; i++) {
-    if ((input[i] = (uint8_t) fgetc (fi)) == EOF) {
-      fprintf (stderr, "ERROR: Can't read from input file %s.\n", filename);
-      exit (EXIT_FAILURE);
+  // Read only enough bytes to identify any supported BOM. Short and empty
+  // input files are valid; fread() simply returns the number of bytes present.
+  nread = fread (input, sizeof (uint8_t), sizeof (input), fi);
+  if (ferror (fi)) {
+    fprintf (stderr, "ERROR: Unable to read input file %s.\n", filename);
+    if (fclose (fi) != 0) {
+      fprintf (stderr, "ERROR: Unable to close input file %s.\n", filename);
     }
+    return (EXIT_FAILURE);
   }
-  rewind (fi);
 
-  // Detect any Byte Order Mark (BOM) at beginning of first line.
-  type = byteordermark (input, bom);
-  if (type < 0) {
-    fprintf (stdout, "\nNo known existing Byte Order Mark (BOM) found in %s.\n\n", filename);
-  } else {
+  // Detect an existing BOM. The detector chooses the longest complete match,
+  // which prevents UTF-32LE from being mistaken for its UTF-16LE prefix.
+  type = byteordermark (input, nread, bom);
+  if (type >= 0) {
     fprintf (stdout, "\nExisting Byte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
     fprintf (stdout, "No action taken.\n\n");
+
+    if (fclose (fi) != 0) {
+      fprintf (stderr, "ERROR: Unable to close input file %s.\n", filename);
+      return (EXIT_FAILURE);
+    }
     return (EXIT_SUCCESS);
   }
 
-  // Open output file.
-  fo = fopen ("out.txt", "r");
-  if (fo != NULL) {
-    fprintf (stderr, "Output file out.txt already exists.\n");
-    exit (EXIT_FAILURE);
-  }
-  fo = fopen ("out.txt", "w");
+  fprintf (stdout, "\nNo known existing Byte Order Mark (BOM) found in %s.\n\n", filename);
+
+  // Create the output file exclusively so an existing out.txt is never
+  // overwritten between a separate existence check and the create operation.
+  errno = 0;
+  fo = fopen ("out.txt", "wbx");
   if (fo == NULL) {
-    fprintf (stderr, "Can't open output file out.txt.\n");
-    exit (EXIT_FAILURE);
+    if (errno == EEXIST) {
+      fprintf (stderr, "ERROR: Output file out.txt already exists.\n");
+    } else {
+      fprintf (stderr, "ERROR: Unable to create output file out.txt.\n");
+    }
+
+    if (fclose (fi) != 0) {
+      fprintf (stderr, "ERROR: Unable to close input file %s.\n", filename);
+    }
+    return (EXIT_FAILURE);
   }
 
-  // Write chosen BOM to output file.
-  for (i=0; i<bom[choice - 1].len; i++) {
-    fputc (bom[choice - 1].sequence[i], fo);
+  status = EXIT_SUCCESS;
+
+  // Write the selected BOM.
+  if (fwrite (bom[choice - 1].sequence, sizeof (uint8_t), bom[choice - 1].len, fo) != bom[choice - 1].len) {
+    fprintf (stderr, "ERROR: Unable to write Byte Order Mark to out.txt.\n");
+    status = EXIT_FAILURE;
   }
 
-  // Append input file.
-  for (i=0; i<nbytes; i++) {
-    fputc (fgetc (fi), fo);
+  // The first bytes of the input file have already been read for BOM
+  // detection, so write those bytes before copying the remainder of the file.
+  if ((status == EXIT_SUCCESS) && (nread > 0u)) {
+    if (fwrite (input, sizeof (uint8_t), nread, fo) != nread) {
+      fprintf (stderr, "ERROR: Unable to write input data to out.txt.\n");
+      status = EXIT_FAILURE;
+    }
   }
 
-  // Close input and output files.
-  fclose (fi);
-  fclose (fo);
+  // Copy the rest of the input file in blocks.
+  if ((status == EXIT_SUCCESS) && (copy_stream (fi, fo) != EXIT_SUCCESS)) {
+    status = EXIT_FAILURE;
+  }
 
-  // Free allocated memory.
-  free (temp);
-  free (input);
-  free (bom);
-  free (filename);
+  // Close both streams and regard a close failure as an I/O failure.
+  if (fclose (fi) != 0) {
+    fprintf (stderr, "ERROR: Unable to close input file %s.\n", filename);
+    status = EXIT_FAILURE;
+  }
+
+  if (fclose (fo) != 0) {
+    fprintf (stderr, "ERROR: Unable to close output file out.txt.\n");
+    status = EXIT_FAILURE;
+  }
+
+  // Do not leave a partial output file after an I/O failure.
+  if (status != EXIT_SUCCESS) {
+    if (remove ("out.txt") != 0) {
+      fprintf (stderr, "WARNING: Unable to remove incomplete output file out.txt.\n");
+    }
+    return (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }
@@ -200,100 +208,151 @@ main (int argc, char **argv) {
 int
 inputtext (char *text) {
 
-  // Request new text from standard input.
-  fgets (text, MAXLEN, stdin);
+  int ch;
+  size_t len;
 
-  // Remove trailing newline, if there.
-  if ((strnlen(text, MAXLEN) > 0) && (text[strnlen (text, MAXLEN) - 1] == '\n')) {
-    text[strnlen (text, MAXLEN) - 1] = '\0';  // Replace newline with string termination.
+  if (text == NULL) {
+    fprintf (stderr, "ERROR: Invalid text buffer supplied to inputtext().\n");
+    exit (EXIT_FAILURE);
+  }
+
+  if (fgets (text, MAX_STRINGLEN, stdin) == NULL) {
+    fprintf (stderr, "ERROR: Unable to read text from standard input.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  len = strlen (text);
+
+  // Remove trailing newline, and a preceding carriage return if present.
+  if ((len > 0u) && (text[len - 1u] == '\n')) {
+    text[--len] = '\0';
+    if ((len > 0u) && (text[len - 1u] == '\r')) {
+      text[--len] = '\0';
+    }
+    return (EXIT_SUCCESS);
+  }
+
+  // If the buffer is full, determine whether the input was exactly
+  // MAX_STRINGLEN - 1 characters or was genuinely too long.
+  if (len == (MAX_STRINGLEN - 1u)) {
+
+    ch = getchar ();
+
+    // Exactly MAX_STRINGLEN - 1 characters followed by newline or EOF.
+    if ((ch == '\n') || (ch == EOF)) {
+      return (EXIT_SUCCESS);
+    }
+
+    // Handle CRLF after an exactly full input line.
+    if (ch == '\r') {
+      ch = getchar ();
+      if ((ch == '\n') || (ch == EOF)) {
+        return (EXIT_SUCCESS);
+      }
+    }
+
+    // Discard the remainder of an overlong input line.
+    while ((ch != '\n') && (ch != EOF)) {
+      ch = getchar ();
+    }
+
+    fprintf (stderr, "ERROR: Input text is too long; maximum is %d characters.\n", MAX_STRINGLEN - 1);
+    exit (EXIT_FAILURE);
   }
 
   return (EXIT_SUCCESS);
 }
 
-// Detect Byte Order Mark (BOM), if it exists, at beginning of line.
-// Return index of bom array corresponding to type of BOM detected,
-// or return -1 if none (or unlisted type) detected.
+// Parse a menu choice. Leading and trailing white space is allowed, but other
+// trailing characters are rejected.
 int
-byteordermark (uint8_t *text, BOM *bom) {
+parse_choice (const char *text, int *choice) {
 
-  int type, i, found;
+  char *endptr;
+  long value;
 
-  // Loop through all types of Byte Order Marks.
-  for (type=0; type<MAXBOM; type++) {
+  if ((text == NULL) || (choice == NULL)) {
+    fprintf (stderr, "ERROR: Invalid argument supplied to parse_choice().\n");
+    return (EXIT_FAILURE);
+  }
 
-    found = 1;  // Default to current type detected.
-    for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) found = 0;
+  errno = 0;
+  value = strtol (text, &endptr, 10);
+  if ((errno == ERANGE) || (endptr == text)) {
+    fprintf (stderr, "ERROR: Cannot make integer of: %s\n", text);
+    return (EXIT_FAILURE);
+  }
+
+  while ((*endptr != '\0') && isspace ((unsigned char) *endptr)) {
+    endptr++;
+  }
+
+  if (*endptr != '\0') {
+    fprintf (stderr, "ERROR: Invalid choice: %s\n", text);
+    return (EXIT_FAILURE);
+  }
+
+  if ((value < 1L) || (value > (long) MAXBOM)) {
+    fprintf (stderr, "ERROR: Choice must be between 1 and %d.\n", MAXBOM);
+    return (EXIT_FAILURE);
+  }
+
+  *choice = (int) value;
+  return (EXIT_SUCCESS);
+}
+
+// Detect a Byte Order Mark (BOM), if one exists at the beginning of text.
+// Return the index of the longest complete matching BOM, or -1 if none of the
+// listed BOMs matches. nbytes is the actual number of bytes available in text.
+int
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *table) {
+
+  int best;
+  size_t type, bestlen;
+
+  if ((text == NULL) || (table == NULL)) {
+    return (-1);
+  }
+
+  best = -1;
+  bestlen = 0u;
+
+  for (type = 0u; type < (size_t) MAXBOM; type++) {
+
+    if ((table[type].len <= nbytes) && (table[type].len > bestlen)) {
+      if (memcmp (text, table[type].sequence, table[type].len) == 0) {
+        best = (int) type;
+        bestlen = table[type].len;
+      }
     }
-
-    // We found a match.
-    if (found) return (type);
   }
 
-  // Failed to find a match.
-  return (-1);
+  return (best);
 }
 
-// Allocate memory for an array of chars.
-char *
-allocate_strmem (int len) {
+// Copy all remaining bytes from the input stream to the output stream.
+int
+copy_stream (FILE *fi, FILE *fo) {
 
-  void *tmp;
+  uint8_t buffer[COPY_BUFSIZE];
+  size_t nread;
 
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
-    exit (EXIT_FAILURE);
+  if ((fi == NULL) || (fo == NULL)) {
+    fprintf (stderr, "ERROR: Invalid file stream supplied to copy_stream().\n");
+    return (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of unsigned chars.
-uint8_t *
-allocate_ustrmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_ustrmem().\n", len);
-    exit (EXIT_FAILURE);
+  while ((nread = fread (buffer, sizeof (uint8_t), sizeof (buffer), fi)) > 0u) {
+    if (fwrite (buffer, sizeof (uint8_t), nread, fo) != nread) {
+      fprintf (stderr, "ERROR: Unable to write input data to out.txt.\n");
+      return (EXIT_FAILURE);
+    }
   }
 
-  tmp = (uint8_t *) malloc (len * sizeof (uint8_t));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (uint8_t));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_ustrmem().\n");
-    exit (EXIT_FAILURE);
+  if (ferror (fi)) {
+    fprintf (stderr, "ERROR: Unable to read input file while copying.\n");
+    return (EXIT_FAILURE);
   }
-}
 
-// Allocate memory for an array of BOM (Byte Order Mark) structs.
-BOM * 
-allocate_bommem (int len) {
-
-  void *tmp; 
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_bommem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-    
-  tmp = (BOM *) malloc (len * sizeof (BOM));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (BOM));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_bommem().\n");
-    exit (EXIT_FAILURE);
-  }
+  return (EXIT_SUCCESS);
 }

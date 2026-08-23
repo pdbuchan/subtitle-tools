@@ -126,8 +126,10 @@ Every tool's README also gives its individual build and usage command. The color
 
 Several programs write fixed output names such as `out.srt`, `out.txt`, `sub.out`, `pgs.out`, `dvb.out`, or bitmap files. Run a tool in a working directory where those output names will not overwrite files you need.
 
-## License
+## Licenses
 
-Code written by P. David Buchan is distributed under the GNU General Public License, version 3 or later, as stated in the source headers and the root [`LICENSE`](LICENSE) file.
+The `ced` and `enc` projects include source files from Google's Compact Encoding Detection project. Those files identify themselves with Google copyright notices and are licensed under the Apache License, Version 2.0.
 
-The `ced` and `enc` directories also contain Google Compact Encoding Detection source files licensed under the Apache License 2.0. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and the license files within those directories.
+The command-line front ends and other files written by P. David Buchan are licensed under the GNU General Public License, version 3 or later where indicated by their source headers. License terms remain attached to the individual files.
+
+Copies of both license texts are available under `LICENSES/`, and each of the `ced/` and `enc/` directories contains local copies for convenience.

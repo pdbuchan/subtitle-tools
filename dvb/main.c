@@ -19,7 +19,7 @@
 int
 main (int argc, char **argv) {
 
-  size_t i, tslen, packet, page_idx;
+  size_t i, j, tslen, packet, page_idx;
   int fi;
   char temp[MAX_STRINGLEN], filename[MAX_STRINGLEN], timestamp[MAX_STRINGLEN];
   uint8_t *tsdata;
@@ -31,15 +31,22 @@ main (int argc, char **argv) {
   PES pes;
   FILE *fo;
 
+  // Initialize top-level state before processing command-line options or input.
+  // This also ensures pointer/count fields begin in a known state before their
+  // more specific initialization below.
+  memset (&state, 0, sizeof (state));
+  memset (&pat, 0, sizeof (pat));
+  memset (&pes, 0, sizeof (pes));
+
   // Process the command line arguments, if any.
   if (argc == 2) {
     state.makebmp_flag = 0;  // No options selected.
 
-  } else if ((argc == 3) && (strncmp (argv[2], "bmp", 3) == 0)) {
+  } else if ((argc == 3) && (strcmp (argv[2], "bmp") == 0)) {
     state.makebmp_flag = 1;
 
   } else {
-    fprintf (stdout, "\ndvb - A tool to analyze a transport steam (.ts) file containing DVB subtitles and produce a report file.\n");
+    fprintf (stdout, "\ndvb - A tool to analyze a transport stream (.ts) file containing DVB subtitles and produce a report file.\n");
     fprintf (stdout, "      Optional function: Produce a bitmap file for each DVB subtitle\n");
     fprintf (stdout, "\nBitmap notes:\n");
     fprintf (stdout, "  Bitmap filenames are: start and end times (hh_mm_ss_ms__hh_mm_ss_ms), and then .bmp.\n");
@@ -53,8 +60,12 @@ main (int argc, char **argv) {
     return (EXIT_SUCCESS);
   }
 
-  memset (filename, 0, MAX_STRINGLEN * sizeof (char));
-  strncpy (filename, argv[1], MAX_STRINGLEN);
+  // Copy the input filename while guaranteeing NUL termination. snprintf() also
+  // tells us if the supplied name was too long for the fixed-size buffer.
+  if (snprintf (filename, sizeof (filename), "%s", argv[1]) >= (int) sizeof (filename)) {
+    fprintf (stderr, "Input filename is too long.\n");
+    return (EXIT_FAILURE);
+  }
 
   memset (temp, 0, MAX_STRINGLEN * sizeof (char));
   memset (timestamp, 0, MAX_STRINGLEN * sizeof (char));
@@ -62,8 +73,8 @@ main (int argc, char **argv) {
   // State
   state.npages = 0;
   state.have_pat = 0;  // We haven't processed a PAT yet. Once we process one, we ignore the rest unless version number changes.
-  state.display_width = 0;  // Final composition width (px); set by assemble_composition().
-  state.display_height = 0;  // Final composition height (px); set by assemble_composition().
+  state.display_width = 0;  // Display width field from the most recently parsed DDS.
+  state.display_height = 0;  // Display height field from the most recently parsed DDS.
   memset (state.pid_type, PID_UNKNOWN, MAX_PIDS * sizeof (PID_TYPE));
   memset (state.section_bytecount, 0, MAX_PIDS * sizeof (size_t));
   memset (state.previous_section_length, 0, MAX_PIDS * sizeof (size_t));  // Total length of previous PSI section
@@ -109,7 +120,14 @@ main (int argc, char **argv) {
     close (fi);
     exit (EXIT_FAILURE);
   }
-  tslen = st.st_size;
+  // mmap() and all parser offsets use size_t, so reject an empty file or a file
+  // whose size cannot be represented safely by size_t.
+  if (st.st_size <= 0 || (uintmax_t) st.st_size > SIZE_MAX) {
+    fprintf (stderr, "Input file has an invalid size.\n");
+    close (fi);
+    return (EXIT_FAILURE);
+  }
+  tslen = (size_t) st.st_size;
 
   // Memory-map the .ts file.
   tsdata = mmap (NULL, tslen, PROT_READ, MAP_PRIVATE, fi, 0);
@@ -140,7 +158,16 @@ main (int argc, char **argv) {
   packet = 0;  // Initialize Transport Stream packet counter.
   state.nsubs = 0;  // Count of subtitles
   while (state.ts_index < tslen) {
-    parse_ts_packet (&state, &page, &pat, tsdata, tslen, &packet, &pes, section, segment, fo);
+    // Propagate parser failures instead of continuing with partially decoded
+    // state, which could otherwise make later packet diagnostics misleading.
+    if (parse_ts_packet (&state, &page, &pat, tsdata, tslen, &packet, &pes,
+                         section, segment, fo) != EXIT_SUCCESS) {
+      fprintf (stderr, "Failed while parsing TS packet %zu.\n", packet);
+      fclose (fo);
+      munmap (tsdata, tslen);
+      close (fi);
+      return (EXIT_FAILURE);
+    }
     packet++;
   }
 
@@ -187,10 +214,12 @@ main (int argc, char **argv) {
   free (segment);
 
   // Page
-size_t j;
   for (i = 0; i < state.npages; i++) {
     for (j = 0; j < page[i].nobjects; j++) {
-      if (page[i].object[j].buffer) free (page[i].object[j].buffer);
+      // Each decoded object owns both its CLUT-index buffer and its coded-pixel
+      // mask used to preserve ragged-right uncoded pixels during composition.
+      free (page[i].object[j].buffer);
+      free (page[i].object[j].coded);
     }
     free (page[i].object);
     if (page[i].clut) free (page[i].clut);

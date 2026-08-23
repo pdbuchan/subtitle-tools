@@ -350,7 +350,43 @@ bool IsSupersetOfAscii7Bit(Encoding e) {
     case BIG5_HKSCS:
     case MACINTOSH_ROMAN:
       return true;
+    // The remaining Encoding values intentionally retain the historical
+    // false result. Listing them explicitly keeps -Wswitch-enum useful
+    // when new values are added to the Encoding enum.
+    case JAPANESE_JIS:
+    case UNICODE:
+    case CZECH_CSN_369103:
+    case ISO_2022_KR:
+    case ISO_2022_CN:
+    case TSCII:
+    case TAMIL_MONO:
+    case TAMIL_BI:
+    case JAGRAN:
+    case UTF7:
+    case BHASKAR:
+    case HTCHANAKYA:
+    case UTF16BE:
+    case UTF16LE:
+    case UTF32BE:
+    case UTF32LE:
+    case BINARYENC:
+    case HZ_GB_2312:
+    case UTF8UTF8:
+    case TAM_ELANGO:
+    case TAM_LTTMBARANI:
+    case TAM_SHREE:
+    case TAM_TBOOMIS:
+    case TAM_TMNEWS:
+    case TAM_WEBTAMIL:
+    case KDDI_SHIFT_JIS:
+    case DOCOMO_SHIFT_JIS:
+    case SOFTBANK_SHIFT_JIS:
+    case KDDI_ISO_2022_JP:
+    case SOFTBANK_ISO_2022_JP:
+    case NUM_ENCODINGS:
+      return false;
     default:
+      // Guard against an out-of-range integer cast to Encoding.
       return false;
   }
 }
@@ -386,7 +422,64 @@ bool Is8BitEncoding(Encoding e) {
     case RUSSIAN_KOI8_RU:
     case RUSSIAN_CP866:
       return true;
+    // The remaining Encoding values intentionally retain the historical
+    // false result. Listing them explicitly keeps -Wswitch-enum useful
+    // when new values are added to the Encoding enum.
+    case JAPANESE_EUC_JP:
+    case JAPANESE_SHIFT_JIS:
+    case JAPANESE_JIS:
+    case CHINESE_BIG5:
+    case CHINESE_GB:
+    case CHINESE_EUC_CN:
+    case KOREAN_EUC_KR:
+    case UNICODE:
+    case CHINESE_EUC_DEC:
+    case CHINESE_CNS:
+    case CHINESE_BIG5_CP950:
+    case JAPANESE_CP932:
+    case UTF8:
+    case UNKNOWN_ENCODING:
+    case RUSSIAN_CP1251:
+    case MSFT_CP1250:
+    case MSFT_CP874:
+    case HEBREW_VISUAL:
+    case CZECH_CP852:
+    case CZECH_CSN_369103:
+    case ISO_2022_KR:
+    case GBK:
+    case GB18030:
+    case BIG5_HKSCS:
+    case ISO_2022_CN:
+    case TSCII:
+    case TAMIL_MONO:
+    case TAMIL_BI:
+    case JAGRAN:
+    case MACINTOSH_ROMAN:
+    case UTF7:
+    case BHASKAR:
+    case HTCHANAKYA:
+    case UTF16BE:
+    case UTF16LE:
+    case UTF32BE:
+    case UTF32LE:
+    case BINARYENC:
+    case HZ_GB_2312:
+    case UTF8UTF8:
+    case TAM_ELANGO:
+    case TAM_LTTMBARANI:
+    case TAM_SHREE:
+    case TAM_TBOOMIS:
+    case TAM_TMNEWS:
+    case TAM_WEBTAMIL:
+    case KDDI_SHIFT_JIS:
+    case DOCOMO_SHIFT_JIS:
+    case SOFTBANK_SHIFT_JIS:
+    case KDDI_ISO_2022_JP:
+    case SOFTBANK_ISO_2022_JP:
+    case NUM_ENCODINGS:
+      return false;
     default:
+      // Guard against an out-of-range integer cast to Encoding.
       return false;
   }
 }
@@ -411,7 +504,71 @@ bool IsCJKEncoding(Encoding e) {
     case ISO_2022_CN:
     case HZ_GB_2312:
       return true;
+    // The remaining Encoding values intentionally retain the historical
+    // false result. Listing them explicitly keeps -Wswitch-enum useful
+    // when new values are added to the Encoding enum.
+    case ISO_8859_1:
+    case ISO_8859_2:
+    case ISO_8859_3:
+    case ISO_8859_4:
+    case ISO_8859_5:
+    case ISO_8859_6:
+    case ISO_8859_7:
+    case ISO_8859_8:
+    case ISO_8859_9:
+    case ISO_8859_10:
+    case UNICODE:
+    case UTF8:
+    case UNKNOWN_ENCODING:
+    case ASCII_7BIT:
+    case RUSSIAN_KOI8_R:
+    case RUSSIAN_CP1251:
+    case MSFT_CP1252:
+    case RUSSIAN_KOI8_RU:
+    case MSFT_CP1250:
+    case ISO_8859_15:
+    case MSFT_CP1254:
+    case MSFT_CP1257:
+    case ISO_8859_11:
+    case MSFT_CP874:
+    case MSFT_CP1256:
+    case MSFT_CP1255:
+    case ISO_8859_8_I:
+    case HEBREW_VISUAL:
+    case CZECH_CP852:
+    case CZECH_CSN_369103:
+    case MSFT_CP1253:
+    case RUSSIAN_CP866:
+    case ISO_8859_13:
+    case TSCII:
+    case TAMIL_MONO:
+    case TAMIL_BI:
+    case JAGRAN:
+    case MACINTOSH_ROMAN:
+    case UTF7:
+    case BHASKAR:
+    case HTCHANAKYA:
+    case UTF16BE:
+    case UTF16LE:
+    case UTF32BE:
+    case UTF32LE:
+    case BINARYENC:
+    case UTF8UTF8:
+    case TAM_ELANGO:
+    case TAM_LTTMBARANI:
+    case TAM_SHREE:
+    case TAM_TBOOMIS:
+    case TAM_TMNEWS:
+    case TAM_WEBTAMIL:
+    case KDDI_SHIFT_JIS:
+    case DOCOMO_SHIFT_JIS:
+    case SOFTBANK_SHIFT_JIS:
+    case KDDI_ISO_2022_JP:
+    case SOFTBANK_ISO_2022_JP:
+    case NUM_ENCODINGS:
+      return false;
     default:
+      // Guard against an out-of-range integer cast to Encoding.
       return false;
   }
 }
@@ -434,7 +591,82 @@ bool IsRightToLeftEncoding(Encoding enc) {
     case ISO_8859_8_I:
     case HEBREW_VISUAL:
       return true;
+    // The remaining Encoding values intentionally retain the historical
+    // false result. Listing them explicitly keeps -Wswitch-enum useful
+    // when new values are added to the Encoding enum.
+    case ISO_8859_1:
+    case ISO_8859_2:
+    case ISO_8859_3:
+    case ISO_8859_4:
+    case ISO_8859_5:
+    case ISO_8859_7:
+    case ISO_8859_9:
+    case ISO_8859_10:
+    case JAPANESE_EUC_JP:
+    case JAPANESE_SHIFT_JIS:
+    case JAPANESE_JIS:
+    case CHINESE_BIG5:
+    case CHINESE_GB:
+    case CHINESE_EUC_CN:
+    case KOREAN_EUC_KR:
+    case UNICODE:
+    case CHINESE_EUC_DEC:
+    case CHINESE_CNS:
+    case CHINESE_BIG5_CP950:
+    case JAPANESE_CP932:
+    case UTF8:
+    case UNKNOWN_ENCODING:
+    case ASCII_7BIT:
+    case RUSSIAN_KOI8_R:
+    case RUSSIAN_CP1251:
+    case MSFT_CP1252:
+    case RUSSIAN_KOI8_RU:
+    case MSFT_CP1250:
+    case ISO_8859_15:
+    case MSFT_CP1254:
+    case MSFT_CP1257:
+    case ISO_8859_11:
+    case MSFT_CP874:
+    case CZECH_CP852:
+    case CZECH_CSN_369103:
+    case MSFT_CP1253:
+    case RUSSIAN_CP866:
+    case ISO_8859_13:
+    case ISO_2022_KR:
+    case GBK:
+    case GB18030:
+    case BIG5_HKSCS:
+    case ISO_2022_CN:
+    case TSCII:
+    case TAMIL_MONO:
+    case TAMIL_BI:
+    case JAGRAN:
+    case MACINTOSH_ROMAN:
+    case UTF7:
+    case BHASKAR:
+    case HTCHANAKYA:
+    case UTF16BE:
+    case UTF16LE:
+    case UTF32BE:
+    case UTF32LE:
+    case BINARYENC:
+    case HZ_GB_2312:
+    case UTF8UTF8:
+    case TAM_ELANGO:
+    case TAM_LTTMBARANI:
+    case TAM_SHREE:
+    case TAM_TBOOMIS:
+    case TAM_TMNEWS:
+    case TAM_WEBTAMIL:
+    case KDDI_SHIFT_JIS:
+    case DOCOMO_SHIFT_JIS:
+    case SOFTBANK_SHIFT_JIS:
+    case KDDI_ISO_2022_JP:
+    case SOFTBANK_ISO_2022_JP:
+    case NUM_ENCODINGS:
+      return false;
     default:
+      // Guard against an out-of-range integer cast to Encoding.
       return false;
   }
 }
@@ -450,7 +682,86 @@ bool IsVisualRightToLeftEncoding(Encoding enc) {
     case HEBREW_ENCODING:
     case HEBREW_VISUAL:
       return true;
+    // The remaining Encoding values intentionally retain the historical
+    // false result. Listing them explicitly keeps -Wswitch-enum useful
+    // when new values are added to the Encoding enum.
+    case ISO_8859_1:
+    case ISO_8859_2:
+    case ISO_8859_3:
+    case ISO_8859_4:
+    case ISO_8859_5:
+    case ISO_8859_6:
+    case ISO_8859_7:
+    case ISO_8859_9:
+    case ISO_8859_10:
+    case JAPANESE_EUC_JP:
+    case JAPANESE_SHIFT_JIS:
+    case JAPANESE_JIS:
+    case CHINESE_BIG5:
+    case CHINESE_GB:
+    case CHINESE_EUC_CN:
+    case KOREAN_EUC_KR:
+    case UNICODE:
+    case CHINESE_EUC_DEC:
+    case CHINESE_CNS:
+    case CHINESE_BIG5_CP950:
+    case JAPANESE_CP932:
+    case UTF8:
+    case UNKNOWN_ENCODING:
+    case ASCII_7BIT:
+    case RUSSIAN_KOI8_R:
+    case RUSSIAN_CP1251:
+    case MSFT_CP1252:
+    case RUSSIAN_KOI8_RU:
+    case MSFT_CP1250:
+    case ISO_8859_15:
+    case MSFT_CP1254:
+    case MSFT_CP1257:
+    case ISO_8859_11:
+    case MSFT_CP874:
+    case MSFT_CP1256:
+    case MSFT_CP1255:
+    case ISO_8859_8_I:
+    case CZECH_CP852:
+    case CZECH_CSN_369103:
+    case MSFT_CP1253:
+    case RUSSIAN_CP866:
+    case ISO_8859_13:
+    case ISO_2022_KR:
+    case GBK:
+    case GB18030:
+    case BIG5_HKSCS:
+    case ISO_2022_CN:
+    case TSCII:
+    case TAMIL_MONO:
+    case TAMIL_BI:
+    case JAGRAN:
+    case MACINTOSH_ROMAN:
+    case UTF7:
+    case BHASKAR:
+    case HTCHANAKYA:
+    case UTF16BE:
+    case UTF16LE:
+    case UTF32BE:
+    case UTF32LE:
+    case BINARYENC:
+    case HZ_GB_2312:
+    case UTF8UTF8:
+    case TAM_ELANGO:
+    case TAM_LTTMBARANI:
+    case TAM_SHREE:
+    case TAM_TBOOMIS:
+    case TAM_TMNEWS:
+    case TAM_WEBTAMIL:
+    case KDDI_SHIFT_JIS:
+    case DOCOMO_SHIFT_JIS:
+    case SOFTBANK_SHIFT_JIS:
+    case KDDI_ISO_2022_JP:
+    case SOFTBANK_ISO_2022_JP:
+    case NUM_ENCODINGS:
+      return false;
     default:
+      // Guard against an out-of-range integer cast to Encoding.
       return false;
   }
 }

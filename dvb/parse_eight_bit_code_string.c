@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,86 +16,38 @@
 
 #include "dvb.h"
 
-// Parse an 8-bit/pixel Code String
-// Reference: ETSI EN 300 743
-size_t
-parse_eight_bit_code_string (STATE *state, SEGMENT *segment, size_t *bitpos, RLE *rle) {
+// Parse one command from an 8-bit/pixel DVB code string.
+// Reference: ETSI EN 300 743.
+int
+parse_eight_bit_code_string (STATE *s, SEGMENT *g, size_t *p, size_t lim, RLE *r) {
 
-  size_t bits_processed, run_length_1_127, run_length_3_127;
-  uint8_t byte, nextbits, switch_1;
+  uint8_t a, b, v;
 
-  bits_processed = 0;
-  rle->runlength = 0;
-  rle->color = 0;
-  rle->emit_one_00_pixel = 0;
-  rle->emit_two_00_pixels = 0;
+  r->runlength = 0;
+  r->color = 0;
+  r->emit_one_00_pixel = 0;
+  r->emit_two_00_pixels = 0;
 
-  // Next 8 bits look-ahead
-  get_8bits (state, segment, bitpos, &byte);
-  nextbits = byte;
-  (*bitpos) += 8;
-  bits_processed += 8;
+  // A non-zero byte represents one pixel whose CLUT entry is that byte.
+  if (get_bits (s, g, p, lim, 8, &a)) return (EXIT_FAILURE);
+  if (a) {
+    r->runlength = 1;
+    r->color = a;
+    return (EXIT_SUCCESS);
+  }
 
-  // Single pixel (8 bits)
-  if (nextbits != 0) {
-    rle->runlength = 1;
-    rle->color = nextbits;
-    return (bits_processed);
+  // A zero byte introduces an RLE command. The switch bit distinguishes a
+  // run of colour 0 from a run followed by an explicit 8-bit colour value.
+  if (get_bits (s, g, p, lim, 1, &b) || get_bits (s, g, p, lim, 7, &v)) return (EXIT_FAILURE);
+  if (!b) {
+    if (!v) r->end_of_string_signal = 1;
+    else r->runlength = v;
+  }
+  else {
+    if (v < 3) return (EXIT_FAILURE);
+    r->runlength = v;
+    if (get_bits (s, g, p, lim, 8, &r->color)) return (EXIT_FAILURE);
+  }
 
-  // Multi-byte RLE
-  } else {
-
-    // nextbits == 0b0000 0000 (8 bits)
-
-    // switch_1 (1 bit)
-    get_8bits (state, segment, bitpos, &byte);
-    switch_1 = (byte >> 7) & 0x01;
-    (*bitpos)++;
-    bits_processed++;
-
-    // Runlength 1-127 or End-of-String
-    if (!switch_1) {
-
-      // Next 7 bits look-ahead
-      get_8bits (state, segment, bitpos, &byte);
-      nextbits = (byte >> 1) & 0x7f;  // 0x7f = 0111 1111
-      (*bitpos) += 7;
-      bits_processed += 7;
-
-      // Runlength 1-127 (7 bits)
-      if (nextbits != 0) {
-          run_length_1_127 = (size_t) nextbits;
-          rle->runlength = run_length_1_127;
-          rle->color = 0;
-
-      // End of String Signal
-      } else {
-        rle->end_of_string_signal = 1;
-      }
-
-      return (bits_processed);
-
-    } else {
-
-      // Runlength 3-127 (7 bits)
-      get_8bits (state, segment, bitpos, &byte);
-      run_length_3_127 = (size_t) ((byte >> 1) & 0x7f);  // 0x7f = 0111 1111
-      if (run_length_3_127 < 3) {
-        fprintf (stderr, "run_length_3_127 < 3 in parse_eight_bit_code_string().\n");
-        exit (EXIT_FAILURE);
-      }
-      rle->runlength = run_length_3_127;
-      (*bitpos) += 7;
-      bits_processed += 7;
-
-      // Color (8 bits)
-      get_8bits (state, segment, bitpos, &byte);
-      rle->color = byte;
-      (*bitpos) += 8;
-      bits_processed += 8;
-    }  // End if switch_1
-
-    return (bits_processed);
-
-  }  // End if single or multi-pixel RLE
+  return (EXIT_SUCCESS);
 }

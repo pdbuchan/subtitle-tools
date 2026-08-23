@@ -20,8 +20,8 @@
 void
 write_u16_le (FILE *fo, uint16_t val) {
 
-    fputc (val & 0xff, fo);
-    fputc ((val >> 8) & 0xff, fo);
+  fputc (val & 0xff, fo);
+  fputc ((val >> 8) & 0xff, fo);
 
 }
 
@@ -29,10 +29,10 @@ write_u16_le (FILE *fo, uint16_t val) {
 void
 write_u32_le (FILE *fo, uint32_t val) {
 
-    fputc (val & 0xff, fo);
-    fputc ((val >> 8) & 0xff, fo);
-    fputc ((val >> 16) & 0xff, fo);
-    fputc ((val >> 24) & 0xff, fo);
+  fputc (val & 0xff, fo);
+  fputc ((val >> 8) & 0xff, fo);
+  fputc ((val >> 16) & 0xff, fo);
+  fputc ((int) ((val >> 24) & 0xffU), fo);
 
 }
 
@@ -40,6 +40,6 @@ write_u32_le (FILE *fo, uint32_t val) {
 void
 write_s32_le (FILE *fo, int32_t val) {
 
-    write_u32_le (fo, (uint32_t) val);  // Cast as unsigned in order to preserve bit pattern.
+  write_u32_le (fo, (uint32_t) val);  // Cast as unsigned in order to preserve bit pattern.
 
 }

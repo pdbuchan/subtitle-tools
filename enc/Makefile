@@ -10,7 +10,7 @@ enc: main.o compact_enc_det.o compact_enc_det_hint_code.o encodings.o languages.
 
 	$(CC) $(DEBUG) main.o compact_enc_det.o compact_enc_det_hint_code.o encodings.o languages.o output.o -o enc $(LIBS)
 
-main.o: main.cc
+main.o: main.cc compact_enc_det.h
 	$(CC) $(DEBUG) $(CCFLAGS) -c main.cc
 
 compact_enc_det.o: compact_enc_det.cc compact_enc_det.h compact_enc_det_hint_code.h string_util.h basictypes.h \
@@ -26,7 +26,7 @@ encodings.o: encodings.cc encodings.h basictypes.h string_util.h case_insensitiv
 languages.o: languages.cc languages.h basictypes.h string_util.h
 	$(CC) $(DEBUG) $(CCFLAGS) -c languages.cc
 
-output.o: output.cc
+output.o: output.cc encodings.h encodings.pb.h
 	$(CC) $(DEBUG) $(CCFLAGS) -c output.cc
 
 # Target for cleaning up

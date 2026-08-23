@@ -83,7 +83,7 @@ resolve_clut_color (CLUT_FAMILY *clut, uint8_t depth, uint8_t entry) {
       return (clut->clut8[entry]);
 
     default:
-      fprintf (stderr,"Reserved region bit depth encountered in resolve_clut_color(): %u\n", depth);
+      fprintf (stderr, "Reserved region bit depth encountered in resolve_clut_color(): %u\n", depth);
       exit (EXIT_FAILURE);
   }
 }

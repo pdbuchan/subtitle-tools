@@ -14,361 +14,487 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-// enc.c - Detect character encoding of a text file, convert to UTF-8, and add a Byte Order Mark (BOM) if requested.
-
-// gcc -Wall enc.c -o enc
+// main.cc - Detect character encoding of a text file, convert to UTF-8, and add a Byte Order Mark (BOM) if requested.
 
 // Run without command line arguments to see usage notes.
 // Output: out.txt
 
-#include <iostream>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
-#include <inttypes.h>  // uint8_t
-#include <string.h>
-#include <string.h>
-#include <errno.h>
 #include "compact_enc_det.h"
 
 // Definition of structs
 typedef struct {
-  int len;
-  char *name;
-  uint8_t *sequence;
+  size_t len;
+  const char *name;
+  const uint8_t *sequence;
 } BOM;
 
 // Function prototypes
-int inputtext (char *);
-int byteordermark (uint8_t *, BOM *);
-const char *enc_name (int);
-char *allocate_strmem (int);
-uint8_t *allocate_ustrmem (int);
-BOM *allocate_bommem (int);
+int inputtext (char *, size_t);
+int byteordermark (const uint8_t *, size_t, const BOM *);
+int run_program (char *const *, int);
+int copy_stream (FILE *, FILE *, size_t *);
+const char *enc_name (Encoding);
+char *allocate_strmem (size_t);
 
 // Set some symbolic constants.
-#define MAXLEN 256  // Maximum number of characters per line
-#define MAXLINES 10  // Maximum number of lines of text per subtitle
-#define MAXBOM 11  // Maximum number of Byte Order Mark (BOM) types
+#define MAXLEN 256  // Maximum number of characters accepted from standard input
+#define MAXBOM 14  // Number of Byte Order Mark (BOM) signatures recognized
 
 int
 main (int argc, char **argv) {
 
-  int i, type, choice, nbytes, bytes_consumed;
-  char *filename, *temp, *temp2, *text;
+  int type, choice, bytes_consumed, output_fd;
+  long file_size;
+  size_t nbytes, nread, bytes_written;
+  char *temp, *temp2, *text;
   const char *encname;
   bool is_reliable;
-  BOM *bom;
   Encoding encoding;
-  FILE *fi, *fo;
+  FILE *fi, *ft, *fo;
 
-  // Byte Order Mark (BOM) names and sequences.
-  char name[MAXBOM][30] = {"UTF-8", "UTF-16 (BE)", "UTF-16 (LE)", "UTF-32 (BE)", "UTF-32 (LE)", "UTF-7", "UTF-1", "UTF-EBCDIC", "SCSU", "BOCU-1", "GB18030"};
-  uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
-  uint8_t utf16be[2]    = {0xfe, 0xff};
-  uint8_t utf16le[2]    = {0xff, 0xfe};
-  uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
-  uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
-  uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
-  uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
-  uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
-  uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
-  uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
-  uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
+  // Byte Order Mark (BOM) names and sequences. UTF-7 has four possible
+  // four-byte signatures, so each is represented separately in this table.
+  static const uint8_t utf8[]       = {0xef, 0xbb, 0xbf};
+  static const uint8_t utf16be[]    = {0xfe, 0xff};
+  static const uint8_t utf16le[]    = {0xff, 0xfe};
+  static const uint8_t utf32be[]    = {0x00, 0x00, 0xfe, 0xff};
+  static const uint8_t utf32le[]    = {0xff, 0xfe, 0x00, 0x00};
+  static const uint8_t utf7_1[]     = {0x2b, 0x2f, 0x76, 0x38};
+  static const uint8_t utf7_2[]     = {0x2b, 0x2f, 0x76, 0x39};
+  static const uint8_t utf7_3[]     = {0x2b, 0x2f, 0x76, 0x2b};
+  static const uint8_t utf7_4[]     = {0x2b, 0x2f, 0x76, 0x2f};
+  static const uint8_t utf1[]       = {0xf7, 0x64, 0x4c};
+  static const uint8_t utfebcdic[]  = {0xdd, 0x73, 0x66, 0x73};
+  static const uint8_t scsu[]       = {0x0e, 0xfe, 0xff};
+  static const uint8_t bocu1[]      = {0xfb, 0xee, 0x28};
+  static const uint8_t gb18030[]    = {0x84, 0x31, 0x95, 0x33};
 
-  // Allocate memory for various arrays.
-  temp = allocate_strmem (MAXLEN);
-  temp2 = allocate_strmem (MAXLEN);
-  bom = allocate_bommem (MAXBOM);
-  filename = allocate_strmem (MAXLEN);
-
-  // Populate array with Byte Order Mark data.
-  bom[0].len = 3;    bom[0].name = name[0];    bom[0].sequence = utf8;
-  bom[1].len = 2;    bom[1].name = name[1];    bom[1].sequence = utf16be;
-  bom[2].len = 2;    bom[2].name = name[2];    bom[2].sequence = utf16le;
-  bom[3].len = 4;    bom[3].name = name[3];    bom[3].sequence = utf32be;
-  bom[4].len = 4;    bom[4].name = name[4];    bom[4].sequence = utf32le;
-  bom[5].len = 3;    bom[5].name = name[5];    bom[5].sequence = utf7;
-  bom[6].len = 3;    bom[6].name = name[6];    bom[6].sequence = utf1;
-  bom[7].len = 4;    bom[7].name = name[7];    bom[7].sequence = utfebcdic;
-  bom[8].len = 3;    bom[8].name = name[8];    bom[8].sequence = scsu;
-  bom[9].len = 3;    bom[9].name = name[9];    bom[9].sequence = bocu1;
-  bom[10].len = 4;   bom[10].name = name[10];  bom[10].sequence = gb18030;
+  static const BOM bom[MAXBOM] = {
+    {sizeof (utf8),      "UTF-8",         utf8},
+    {sizeof (utf16be),   "UTF-16 (BE)",   utf16be},
+    {sizeof (utf16le),   "UTF-16 (LE)",   utf16le},
+    {sizeof (utf32be),   "UTF-32 (BE)",   utf32be},
+    {sizeof (utf32le),   "UTF-32 (LE)",   utf32le},
+    {sizeof (utf7_1),    "UTF-7",         utf7_1},
+    {sizeof (utf7_2),    "UTF-7",         utf7_2},
+    {sizeof (utf7_3),    "UTF-7",         utf7_3},
+    {sizeof (utf7_4),    "UTF-7",         utf7_4},
+    {sizeof (utf1),      "UTF-1",         utf1},
+    {sizeof (utfebcdic), "UTF-EBCDIC",    utfebcdic},
+    {sizeof (scsu),      "SCSU",          scsu},
+    {sizeof (bocu1),     "BOCU-1",        bocu1},
+    {sizeof (gb18030),   "GB18030",       gb18030}
+  };
 
   // Process the command line arguments, if any.
-  if (argc == 2) {
-    strncpy (filename, argv[1], MAXLEN);
-  
-  } else {
+  if (argc != 2) {
     fprintf (stdout, "\nUsage: ./enc inputfilename\n");
     fprintf (stdout, "       Output will be out.txt.\n\n");
     return (EXIT_SUCCESS);
   }
 
-  fprintf (stdout, "\nInput file: %s\n\n", filename);
+  fprintf (stdout, "\nInput file: %s\n\n", argv[1]);
 
   // Open input file.
-  fi = fopen (filename, "rb");
+  fi = fopen (argv[1], "rb");
   if (fi == NULL) {
-    fprintf (stderr, "\nERROR: Unable to open input file %s.\n", filename);
-    exit (EXIT_FAILURE);
-  }
-
-  // Count bytes in file.
-  nbytes = 0;
-  while (fgetc (fi) != EOF) {
-    nbytes++;
-  }
-  rewind (fi);
-  fprintf (stdout, "%i bytes in input file.\n", nbytes);
-
-  // Stop if less than 4 bytes in file.
-  if (nbytes < 4) {
-    fprintf (stderr, "ERROR: There are less than 4 bytes in input file.\n");
-    fprintf (stderr, "       No action taken.\n\n");
-    fclose (fi);
-    free (temp);
-    free (temp2);
-    free (bom);
-    free (filename);
+    fprintf (stderr, "ERROR: Unable to open input file %s.\n", argv[1]);
     return (EXIT_FAILURE);
   }
 
-  // Allocate memory for various arrays.
-  text = allocate_strmem (nbytes);
-
-  // Read file contents.
-  for (i=0; i<nbytes; i++) {
-    text[i] = fgetc (fi);
+  // Determine the size of the input file. CompactEncDet::DetectEncoding()
+  // accepts the input length as an int, so files larger than INT_MAX cannot
+  // be passed to it safely.
+  if (fseek (fi, 0L, SEEK_END) != 0) {
+    fprintf (stderr, "ERROR: Unable to seek to the end of input file %s.\n", argv[1]);
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
-  if (i != nbytes) {
-    fprintf (stderr, "ERROR: Unable to read input file %s\n", filename);
-    fprintf (stderr, "       %i bytes read.\n", i);
-    exit (EXIT_FAILURE);
+
+  file_size = ftell (fi);
+  if (file_size < 0) {
+    fprintf (stderr, "ERROR: Unable to determine the size of input file %s.\n", argv[1]);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+  if (file_size > INT_MAX) {
+    fprintf (stderr, "ERROR: Input file %s is too large for CED.\n", argv[1]);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+
+  nbytes = (size_t) file_size;
+  rewind (fi);
+  fprintf (stdout, "%zu bytes in input file.\n", nbytes);
+
+  // Allocate one extra zero-filled byte. CED uses the explicit byte count,
+  // but the extra byte makes the buffer safe to inspect as a C string while
+  // debugging and also permits a zero-length input file.
+  text = allocate_strmem (nbytes + 1);
+
+  // Read the complete file, including any embedded NUL bytes.
+  nread = fread (text, 1, nbytes, fi);
+  if (nread != nbytes) {
+    fprintf (stderr, "ERROR: Unable to read complete input file %s.\n", argv[1]);
+    fclose (fi);
+    free (text);
+    return (EXIT_FAILURE);
   }
 
   // Close input file.
   fclose (fi);
 
-  // Detect any Byte Order Mark (BOM) at beginning of first line.
-  type = byteordermark ((uint8_t *) text, bom);
+  // Detect any known Byte Order Mark (BOM) at the start of the file. The
+  // detector chooses the longest matching signature because UTF-16LE's
+  // FF FE signature is a prefix of UTF-32LE's FF FE 00 00 signature.
+  type = byteordermark ((const uint8_t *) text, nbytes, bom);
   if (type < 0) {
-    fprintf (stdout, "\nNo known existing Byte Order Mark (BOM) found in %s.\n", filename);
+    fprintf (stdout, "\nNo known existing Byte Order Mark (BOM) found in %s.\n", argv[1]);
   } else {
     fprintf (stdout, "\nExisting Byte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
     fprintf (stdout, "No action taken.\n\n");
+    free (text);
     return (EXIT_SUCCESS);
   }
+
+  // Allocate buffers used for interactive input.
+  temp = allocate_strmem (MAXLEN);
+  temp2 = allocate_strmem (MAXLEN);
 
   // Ask if Byte Order Mark (BOM) should be prepended to output file.
   fprintf (stdout, "\nDo you want a UTF-8 Byte Order Mark (BOM) prepended to output file out.txt (y/n)? ");
   choice = 0;  // Default to no.
-  memset (temp, 0, MAXLEN * sizeof (char));
   do {
-    inputtext (temp);
-  } while (((temp[0] != 'y') && (temp[0] != 'Y') && (temp[0] != 'n') && (temp[0] != 'N')) || (strnlen (temp, MAXLEN) > 1));
-  if ((temp[0] == 'y') || (temp[0] == 'Y')) choice = 1;
+    memset (temp, 0, MAXLEN * sizeof (char));
+    if (inputtext (temp, MAXLEN) != EXIT_SUCCESS) {
+      fprintf (stderr, "\nERROR: Unable to read response from standard input.\n");
+      free (temp);
+      free (temp2);
+      free (text);
+      return (EXIT_FAILURE);
+    }
+  } while (((temp[0] != 'y') && (temp[0] != 'Y') && (temp[0] != 'n') && (temp[0] != 'N')) || (strnlen (temp, MAXLEN) != 1));
+  if ((temp[0] == 'y') || (temp[0] == 'Y')) {
+    choice = 1;
+  }
 
-  // Detect probable current encoding of input file.
-  encoding = CompactEncDet::DetectEncoding (text, nbytes, nullptr, nullptr, nullptr,
+  // Detect probable current encoding of input file. Pass the actual byte
+  // count instead of strlen(), since CED is designed to examine arbitrary
+  // raw bytes and the input may contain embedded NUL bytes.
+  encoding = CompactEncDet::DetectEncoding (text, (int) nbytes, nullptr, nullptr, nullptr,
     UNKNOWN_ENCODING, UNKNOWN_LANGUAGE, CompactEncDet::QUERY_CORPUS, true,
     &bytes_consumed, &is_reliable);
 
   // Obtain name of probable current encoding.
   encname = enc_name (encoding);
+  if (encname == nullptr) {
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
+  }
 
   // Present CED's results.
   fprintf (stdout, "\nCED:\nProbable encoding: %s\n", encname);
   fprintf (stdout, "bytes consumed: %i\n", bytes_consumed);
   fprintf (stdout, "Is reliable?: %s\n", is_reliable ? "true" : "false");
 
-  // Obtain and present chardet's results.
+  // Obtain and present chardet's results. Execute chardet directly rather
+  // than building a shell command, so spaces and shell metacharacters in the
+  // filename cannot change the command being executed.
   fprintf (stdout, "\nchardet:\n");
-  memset (temp, 0, MAXLEN * sizeof (char));
-  sprintf (temp, "chardet %s", filename);
-  system (temp);
-  sleep (1);  // Allow 1 second for chardet() to work and present results.
+  fflush (stdout);
+  {
+    char command[] = "chardet";
+    char *command_argv[] = {command, argv[1], nullptr};
+    if (run_program (command_argv, -1) != EXIT_SUCCESS) {
+      fprintf (stderr, "WARNING: chardet did not complete successfully.\n");
+    }
+  }
 
   // Ask for user to select their choice for most probable encoding.
   fprintf (stdout, "\nChoose most likely encoding: ");
   memset (temp2, 0, MAXLEN * sizeof (char));
-  inputtext (temp2);
+  if (inputtext (temp2, MAXLEN) != EXIT_SUCCESS) {
+    fprintf (stderr, "\nERROR: Unable to read encoding from standard input.\n");
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
+  }
+  if (temp2[0] == '\0') {
+    fprintf (stderr, "ERROR: No input encoding was specified.\n");
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
+  }
   fprintf (stdout, "\n");
 
-  // Use iconv to convert from probably current encoding to UTF-8 encoding.
-  memset (temp, 0, MAXLEN * sizeof (char));
-  sprintf (temp, "iconv -f %s -t UTF-8 %s -o out.tmp", temp2, filename);
-  system (temp);
-  sleep (1);  // Allow 1 second for iconv() to work and create out.tmp.
-
-  // Open temporary file.
-  fi = fopen ("out.tmp", "rb");
-  if (fi == NULL) {
-    fprintf (stderr, "\nERROR: Unable to open temporary file out.tmp.\n");
-    exit (EXIT_FAILURE);
+  // Convert from the selected current encoding to UTF-8. tmpfile() provides
+  // a private temporary file and avoids races or accidental overwriting of a
+  // fixed filename such as out.tmp. iconv's stdout is redirected to it.
+  ft = tmpfile ();
+  if (ft == NULL) {
+    fprintf (stderr, "ERROR: Unable to create temporary file: %s.\n", strerror (errno));
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
   }
 
-  // Count bytes in file.
-  nbytes = 0;
-  while (fgetc (fi) != EOF) {
-    nbytes++;
+  fflush (ft);
+  {
+    char command[] = "iconv";
+    char from[] = "-f";
+    char to[] = "-t";
+    char utf8_name[] = "UTF-8";
+    char *command_argv[] = {command, from, temp2, to, utf8_name, argv[1], nullptr};
+    if (run_program (command_argv, fileno (ft)) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: iconv was unable to convert input file %s using encoding %s.\n", argv[1], temp2);
+      fclose (ft);
+      free (temp);
+      free (temp2);
+      free (text);
+      return (EXIT_FAILURE);
+    }
   }
-  rewind (fi);
 
-  // Allocate memory for various arrays.
-  free (text);
-  text = allocate_strmem (nbytes);
-
-  // Read file contents.
-  for (i=0; i<nbytes; i++) {
-    text[i] = fgetc (fi);
+  if (fseek (ft, 0L, SEEK_SET) != 0) {
+    fprintf (stderr, "ERROR: Unable to rewind temporary conversion file.\n");
+    fclose (ft);
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
   }
-  fprintf (stdout, "%i bytes read from temporary file out.tmp\n", i);
 
-  // Close input file.
-  fclose (fi);
-
-  // Remove temporary file.
-  system ("rm -f out.tmp");
-
-  // Open output file.
-  fo = fopen ("out.txt", "r");
-  if (fo != NULL) {
-    fprintf (stderr, "Output file out.txt already exists.\n");
-    exit (EXIT_FAILURE);
+  // Create out.txt without overwriting an existing file. O_EXCL also avoids
+  // the check-then-open race that occurs when existence is tested separately.
+  output_fd = open ("out.txt", O_WRONLY | O_CREAT | O_EXCL, 0666);
+  if (output_fd < 0) {
+    if (errno == EEXIST) {
+      fprintf (stderr, "Output file out.txt already exists.\n");
+    } else {
+      fprintf (stderr, "ERROR: Can't create output file out.txt: %s.\n", strerror (errno));
+    }
+    fclose (ft);
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
   }
-  fo = fopen ("out.txt", "w");
+
+  fo = fdopen (output_fd, "wb");
   if (fo == NULL) {
-    fprintf (stderr, "Can't open output file out.txt.\n");
-    exit (EXIT_FAILURE);
+    fprintf (stderr, "ERROR: Can't associate a stream with output file out.txt: %s.\n", strerror (errno));
+    close (output_fd);
+    remove ("out.txt");
+    fclose (ft);
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
   }
 
   // Write UTF-8 BOM to output file, if requested.
   if (choice > 0) {
-    for (i=0; i<bom[0].len; i++) {
-      fputc (bom[0].sequence[i], fo);
+    if (fwrite (utf8, 1, sizeof (utf8), fo) != sizeof (utf8)) {
+      fprintf (stderr, "ERROR: Unable to write UTF-8 Byte Order Mark to out.txt.\n");
+      fclose (fo);
+      remove ("out.txt");
+      fclose (ft);
+      free (temp);
+      free (temp2);
+      free (text);
+      return (EXIT_FAILURE);
     }
-    fprintf (stdout, "%s Byte Order Mark (BOM) prepended to output file out.txt.\n\n", name[0]);
+    fprintf (stdout, "UTF-8 Byte Order Mark (BOM) prepended to output file out.txt.\n\n");
   } else {
     fprintf (stdout, "No Byte Order Mark (BOM) prepended to output file out.txt.\n\n");
   }
 
-  // Append input file.
-  for (i=0; i<nbytes; i++) {
-    fputc (text[i], fo);
+  // Append converted UTF-8 data from the temporary file to out.txt.
+  if (copy_stream (ft, fo, &bytes_written) != EXIT_SUCCESS) {
+    fprintf (stderr, "ERROR: Unable to copy converted data to out.txt.\n");
+    fclose (fo);
+    remove ("out.txt");
+    fclose (ft);
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
   }
+  fprintf (stdout, "%zu bytes of converted UTF-8 data written to out.txt.\n", bytes_written);
 
-  // Close output file.
-  fclose (fo);
+  // Close files.
+  if (fclose (fo) != 0) {
+    fprintf (stderr, "ERROR: Unable to close output file out.txt successfully.\n");
+    remove ("out.txt");
+    fclose (ft);
+    free (temp);
+    free (temp2);
+    free (text);
+    return (EXIT_FAILURE);
+  }
+  fclose (ft);
 
   // Free allocated memory.
   free (temp);
   free (temp2);
   free (text);
-  free (bom);
-  free (filename);
 
   return (EXIT_SUCCESS);
 }
 
 // Obtain a text string from standard input. It can include spaces.
 int
-inputtext (char *text) {
+inputtext (char *text, size_t len) {
+
+  size_t n;
+  int c;
+
+  if ((text == nullptr) || (len < 2) || (len > INT_MAX)) {
+    return (EXIT_FAILURE);
+  }
 
   // Request new text from standard input.
-  fgets (text, MAXLEN, stdin);
+  if (fgets (text, (int) len, stdin) == nullptr) {
+    return (EXIT_FAILURE);
+  }
 
-  // Remove trailing newline, if there.
-  if ((strnlen(text, MAXLEN) > 0) && (text[strnlen (text, MAXLEN) - 1] == '\n')) {
-    text[strnlen (text, MAXLEN) - 1] = '\0';  // Replace newline with string termination.
+  n = strnlen (text, len);
+
+  // Remove trailing newline, if there. If the input line was longer than the
+  // supplied buffer, discard its remainder so it does not become the answer
+  // to the next prompt.
+  if ((n > 0) && (text[n - 1] == '\n')) {
+    text[n - 1] = '\0';
+  } else {
+    do {
+      c = fgetc (stdin);
+    } while ((c != '\n') && (c != EOF));
   }
 
   return (EXIT_SUCCESS);
 }
 
-// Detect Byte Order Mark (BOM), if it exists, at beginning of line.
-// Return index of bom array corresponding to type of BOM detected,
-// or return -1 if none (or unlisted type) detected.
+// Detect a Byte Order Mark (BOM), if one exists at the beginning of the file.
+// Return the index of the longest matching bom[] entry, or -1 if no listed
+// signature is present. Choosing the longest match is important because the
+// UTF-16LE signature is a prefix of the UTF-32LE signature.
 int
-byteordermark (uint8_t *text, BOM *bom) {
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom) {
 
-  int type, i, found;
+  int type, found_type;
+  size_t longest;
 
-  // Loop through all types of Byte Order Marks.
-  for (type=0; type<MAXBOM; type++) {
+  found_type = -1;
+  longest = 0;
 
-    found = 1;  // Default to current type detected.
-    for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) found = 0;
+  // Loop through all recognized Byte Order Mark signatures.
+  for (type = 0; type < MAXBOM; type++) {
+    if ((bom[type].len <= nbytes) && (bom[type].len > longest) &&
+      (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
+      found_type = type;
+      longest = bom[type].len;
     }
-
-    // We found a match.
-    if (found) return (type);
   }
 
-  // Failed to find a match.
-  return (-1);
+  return (found_type);
+}
+
+// Execute a program directly without invoking a command shell. If output_fd
+// is non-negative, redirect the child's standard output to that descriptor.
+int
+run_program (char *const *program_argv, int output_fd) {
+
+  int status;
+  pid_t pid, result;
+
+  pid = fork ();
+  if (pid < 0) {
+    fprintf (stderr, "ERROR: fork() failed while starting %s: %s.\n", program_argv[0], strerror (errno));
+    return (EXIT_FAILURE);
+  }
+
+  if (pid == 0) {
+    if ((output_fd >= 0) && (dup2 (output_fd, STDOUT_FILENO) < 0)) {
+      fprintf (stderr, "ERROR: Unable to redirect output for %s: %s.\n", program_argv[0], strerror (errno));
+      _exit (EXIT_FAILURE);
+    }
+
+    execvp (program_argv[0], program_argv);
+    fprintf (stderr, "ERROR: Unable to execute %s: %s.\n", program_argv[0], strerror (errno));
+    _exit (EXIT_FAILURE);
+  }
+
+  do {
+    result = waitpid (pid, &status, 0);
+  } while ((result < 0) && (errno == EINTR));
+
+  if (result < 0) {
+    fprintf (stderr, "ERROR: waitpid() failed for %s: %s.\n", program_argv[0], strerror (errno));
+    return (EXIT_FAILURE);
+  }
+
+  if (!WIFEXITED (status) || (WEXITSTATUS (status) != EXIT_SUCCESS)) {
+    return (EXIT_FAILURE);
+  }
+
+  return (EXIT_SUCCESS);
+}
+
+// Copy all bytes from one stream to another.
+int
+copy_stream (FILE *fi, FILE *fo, size_t *bytes_written) {
+
+  unsigned char buffer[8192];
+  size_t nread, total;
+
+  total = 0;
+  while ((nread = fread (buffer, 1, sizeof (buffer), fi)) > 0) {
+    if (fwrite (buffer, 1, nread, fo) != nread) {
+      return (EXIT_FAILURE);
+    }
+    total += nread;
+  }
+
+  if (ferror (fi)) {
+    return (EXIT_FAILURE);
+  }
+
+  *bytes_written = total;
+
+  return (EXIT_SUCCESS);
 }
 
 // Allocate memory for an array of chars.
 char *
-allocate_strmem (int len) {
+allocate_strmem (size_t len) {
 
-  void *tmp;
+  char *tmp;
 
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
+  if (len == 0) {
+    fprintf (stderr, "ERROR: Cannot allocate zero bytes in allocate_strmem().\n");
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return ((char *) tmp);
-  } else {
+  tmp = (char *) calloc (len, sizeof (char));
+  if (tmp == nullptr) {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
     exit (EXIT_FAILURE);
   }
-}
 
-// Allocate memory for an array of unsigned chars.
-uint8_t *
-allocate_ustrmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_ustrmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (uint8_t *) malloc (len * sizeof (uint8_t));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (uint8_t));
-    return ((uint8_t *) tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_ustrmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of BOM (Byte Order Mark) structs.
-BOM * 
-allocate_bommem (int len) {
-
-  void *tmp; 
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_bommem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-    
-  tmp = (BOM *) malloc (len * sizeof (BOM));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (BOM));
-    return ((BOM *) tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_bommem().\n");
-    exit (EXIT_FAILURE);
-  }
+  return (tmp);
 }

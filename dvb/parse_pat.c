@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,188 +16,166 @@
 
 #include "dvb.h"
 
+// Release the current PAT and every PMT/elementary-stream list owned by it.
+// PID classifications are cleared while the old PID values are still
+// available, before the structures containing those values are freed.
+static void
+release_pat (STATE *state, PAT *pat) {
+
+  size_t i, j;
+
+  for (i = 0; i < pat->nprograms; i++) {
+    if (pat->program[i].pmt_pid < MAX_PIDS) {
+      state->pid_type[pat->program[i].pmt_pid] = PID_UNKNOWN;
+    }
+    for (j = 0; j < pat->program[i].pmt.nstreams; j++) {
+      uint16_t epid = pat->program[i].pmt.stream[j].elementary_stream_pid;
+      if (epid < MAX_PIDS) {
+        state->pid_type[epid] = PID_UNKNOWN;
+      }
+    }
+    free (pat->program[i].pmt.stream);
+  }
+  free (pat->program);
+  pat->program = NULL;
+  pat->nprograms = 0;
+}
+
 // Parse a Program Association Table (PAT).
-// The PAT lists all Programs and their PMT PIDs.
-// PID = 0x0000; There can only be one, but it can be updated if version changes.
-// Reference: ISO/IEC 13818-1
+// One PAT maps program numbers to the PIDs carrying their Program Map Tables.
+// Reference: ISO/IEC 13818-1.
 int
 parse_pat (STATE *state, PAT *pat, SECTION *section, FILE *fo) {
 
-  size_t i, j, offset, section_length, program_info_bytes, end, nprograms;
-  uint8_t table_id, section_syntax_indicator, version_number, current_next_indicator, section_number, last_section_number;
-  uint16_t pid, transport_stream_id, program_number[MAX_PROGRAMS], program_map_pid[MAX_PROGRAMS];
+  size_t offset, section_length, total, entries_end, entries_bytes;
+  size_t nprograms, i;
+  uint8_t table_id, ssi, version, current, section_number, last_section;
+  uint16_t pid, tsid, program_number, pmt_pid;
+  PROGRAM *new_programs;
 
   pid = state->pid;
-
-  // Set some arrays to 0.
-  memset (program_number, 0, MAX_PROGRAMS * sizeof (uint16_t));
-  memset (program_map_pid, 0, MAX_PROGRAMS * sizeof (uint16_t));
-
-  offset = 0;  // Start at beginning of section.
+  offset = 0;
+  nprograms = 0;
+  new_programs = NULL;
 
   fprintf (fo, "Program Association Table (PAT):\n");
 
-  // Table ID (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-    exit (EXIT_FAILURE);
+  // Table ID (1 byte), Section Syntax Indicator (1 bit), and Section Length
+  // (12 bits). section_length counts from transport_stream_id through CRC.
+  if (!bytes_available (offset, 3, section[pid].length)) {
+    return (EXIT_FAILURE);
   }
-  table_id = section[pid].buffer[offset];
-  fprintf (fo, "  Table ID (1 byte): 0x%02x\n", table_id);
-  offset++;
-
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Section Syntax Indicator (1 bit)
-  section_syntax_indicator = (section[pid].buffer[offset] >> 7) & 1;
-  fprintf (fo, "  Section Syntax Indicator (1 bit): %u\n", section_syntax_indicator);
-
-  // 0 (1 bit)
-
-  // Reserved (2 bits)
-
-  // Section Length (12 bits)
-  section_length = (size_t) ((section[pid].buffer[offset] & 0x0f) << 8 |
-                 section[pid].buffer[offset + 1]);
-  fprintf (fo, "  Section Length (12 bits): %zu bytes (%zu bytes including table ID, SSI, section len)\n", section_length, section_length + 3);
+  table_id = section[pid].buffer[offset++];
+  ssi = (section[pid].buffer[offset] >> 7) & 1;
+  section_length = (size_t) (((section[pid].buffer[offset] & 0x0f) << 8) |
+                             section[pid].buffer[offset + 1]);
   offset += 2;
 
-  // Transport Stream ID (2 bytes)
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-    exit (EXIT_FAILURE);
+  if (table_id != 0x00 || ssi != 1 || section_length < 9 ||
+      section_length > 1021 ||
+      !bytes_available (0, section_length + 3, section[pid].length)) {
+    return (EXIT_FAILURE);
   }
-  transport_stream_id = (section[pid].buffer[offset] << 8) |
-                         section[pid].buffer[offset + 1];
-  fprintf (fo, "  Transport Stream ID (2 bytes): 0x%04x\n", transport_stream_id);
+  total = section_length + 3;
+  entries_end = total - 4;  // CRC begins here.
+
+  // Transport Stream ID (2 bytes), Version Number (5 bits), Current/Next
+  // Indicator (1 bit), Section Number, and Last Section Number.
+  if (!bytes_available (offset, 5, entries_end)) {
+    return (EXIT_FAILURE);
+  }
+  tsid = (uint16_t) (((uint16_t) section[pid].buffer[offset] << 8) |
+                     section[pid].buffer[offset + 1]);
   offset += 2;
+  version = (section[pid].buffer[offset] >> 1) & 0x1f;
+  current = section[pid].buffer[offset++] & 1;
+  section_number = section[pid].buffer[offset++];
+  last_section = section[pid].buffer[offset++];
 
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-    exit (EXIT_FAILURE);
+  fprintf (fo,
+           "  Table ID: 0x%02x Section Length: %zu Transport Stream ID: "
+           "0x%04x Version: %u Current: %u Section: %u/%u\n",
+           table_id, section_length, tsid, version, current,
+           section_number, last_section);
+
+  // This program currently expects the PAT to fit in one PSI section.
+  if (last_section != 0 || section_number != 0) {
+    fprintf (stderr, "Multi-section PATs are not supported.\n");
+    return (EXIT_FAILURE);
   }
 
-  // Reserved (2 bits)
-
-  // Version Number (5 bits)
-  version_number = (section[pid].buffer[offset] >> 1) & 0x1f;  // 0x1f = 11111
-  fprintf (fo, "  Version Number (5 bits): 0x%02x\n", version_number);
-
-  // Normally you don't bother processing anything more if version hasn't changed.
-  // We will continue anyway for the sake of the output file.
-
-  // Current Next Indicator (1 bit)
-  current_next_indicator = section[pid].buffer[offset] & 1;
-  fprintf (fo, "  Current Next Indicator (1 bit): %u\n", current_next_indicator);
-  offset++;
-
-  // Section Number (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-    exit (EXIT_FAILURE);
+  entries_bytes = entries_end - offset;
+  if ((entries_bytes % 4) != 0) {
+    return (EXIT_FAILURE);
   }
-  section_number = section[pid].buffer[offset];
-  fprintf (fo, "  Section Number (1 byte): 0x%02x\n", section_number);
-  offset++;
 
-  // Last Section Number (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-    exit (EXIT_FAILURE);
-  }
-  last_section_number = section[pid].buffer[offset];
-  fprintf (fo, "  Last Section Number (1 byte): 0x%02x\n", last_section_number);
-  offset++;
+  // Program loop, first pass. Each four-byte entry contains Program Number
+  // (16 bits), Reserved (3 bits), and Program Map PID (13 bits). Program
+  // number zero identifies the NIT PID and is not a PMT program entry.
+  for (i = 0; i < entries_bytes / 4; i++) {
+    program_number = (uint16_t) (((uint16_t) section[pid].buffer[offset] << 8) | section[pid].buffer[offset + 1]);
+    pmt_pid = (uint16_t) (((section[pid].buffer[offset + 2] & 0x1f) << 8) | section[pid].buffer[offset + 3]);
+    offset += 4;
 
-  // Program loop
-  program_info_bytes = section_length - 5 - 4;  // We start after section_length: header (5 bytes), CRC (4 bytes)
-  end = offset + program_info_bytes;
-  nprograms = 0;
-
-  while (((offset) + 4) <= end) {  // 4 bytes for CRC
-
-    // Program number (16 bits)
-    if ((offset + 1) >= MAX_BUFFERLEN) {
-      fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-      exit (EXIT_FAILURE);
-    }
-    program_number[nprograms] = (section[pid].buffer[offset] << 8) |
-                      section[pid].buffer[offset + 1];
-    offset += 2;
-
-    if ((offset + 1) >= MAX_BUFFERLEN) {
-      fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-      exit (EXIT_FAILURE);
-    }
-
-    // Reserved (3 bits)
-
-    // Program Map PID (13 bits)
-    program_map_pid[nprograms] = ((section[pid].buffer[offset] & 0x1f) << 8) |  // 0x1f = 11111
-                        section[pid].buffer[offset + 1];
-    offset += 2;
-
-    if (program_number[nprograms] == 0) {
-      fprintf (fo, "  NIT PID (13 bits): 0x%04x\n", program_map_pid[nprograms]);
+    if (program_number == 0) {
+      fprintf (fo, "  NIT PID: 0x%04x\n", pmt_pid);
     } else {
-      fprintf (fo, "  Program (16 bits) %u -> PMT PID (13 bits): 0x%04x\n", program_number[nprograms], program_map_pid[nprograms]);
-
-      // Increment count of programs.
+      fprintf (fo, "  Program %u -> PMT PID 0x%04x\n", program_number, pmt_pid);
       nprograms++;
     }
   }
-  if (nprograms > 1) {
-    fprintf (stderr, "Warning: More than one programs listed in PAT.\n");
-    fprintf (stderr, "         Expected only one, corresponding to the PMT of single DVB stream extracted from media .ts file using ffmpeg.\n");
+
+  // CRC (4 bytes). parse_psi_section() has already verified it, but include
+  // the transmitted value in the report.
+  fprintf (fo, "  CRC: %02x%02x%02x%02x\n", section[pid].buffer[entries_end], section[pid].buffer[entries_end + 1], section[pid].buffer[entries_end + 2], section[pid].buffer[entries_end + 3]);
+
+  // A current_next_indicator of zero describes a future PAT and must not
+  // replace the active PID map.
+  if (!current) {
+    return (EXIT_SUCCESS);
   }
 
-  // CRC (4 bytes)
-  if ((offset + 3) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_pat().\n");
-    exit (EXIT_FAILURE);
+  // PATs are broadcast frequently. If the version has not changed, retain
+  // the existing program and PMT state after reporting the repeated table.
+  if (state->have_pat && pat->version == version) {
+    return (EXIT_SUCCESS);
   }
-  fprintf (fo, "  CRC (4 bytes): ");
-  for (i = 0; i < 4; i++) {
-    fprintf (fo, "%02x", section[pid].buffer[offset + i]);
+
+  // Allocate the replacement program array at exactly the required size.
+  if (nprograms > 0) {
+    new_programs = allocate_progmem (nprograms);
   }
-  fprintf (fo, "\n");
 
-  // This is the first time we are parsing the PAT.
-  if (!state->have_pat) {
+  // Second pass: populate the newly allocated PROGRAM array. Starting from a
+  // separate allocation lets a new PAT safely contain more programs than the
+  // previous version.
+  offset = 8;
+  nprograms = 0;
+  while (offset < entries_end) {
+    program_number = (uint16_t) (((uint16_t) section[pid].buffer[offset] << 8) | section[pid].buffer[offset + 1]);
+    pmt_pid = (uint16_t) (((section[pid].buffer[offset + 2] & 0x1f) << 8) | section[pid].buffer[offset + 3]);
+    offset += 4;
 
-    // Allocate memory for pat->program array.
-    pat->program = allocate_progmem (nprograms);
-    for (i = 0; i < nprograms; i++) {
-      pat->program[i].pmt.stream = NULL;  // Will be allocated dynamically by parse_pmt().
+    if (program_number == 0) {
+      continue;
     }
-
-  // The PAT version has changed.
-  // The PAT is broadcast roughly every 1/10th of a second, so most will have same version number and can be ignored, however,
-  // we report to output file all data above regardless of whether new PAT/new version or repeat of existing PAT.
-  } else if (pat->version != version_number) {
-
-    // Clear existing PAT.
-    for (i = 0; i < pat->nprograms; i++) {
-      for (j = 0; j < pat->program[i].pmt.nstreams; j++) {
-        memset (&pat->program[i].pmt.stream[j], 0, sizeof (PMT_STREAM));
-      }
-    }  // End for pat->nprograms
-  }  // End if have_pat or new version
-
-  // Store program_number/program_map_pid values.
-  pat->nprograms = nprograms;
-  for (i = 0; i < pat->nprograms; i++) {
-    pat->program[i].program_number = program_number[i];
-    pat->program[i].pmt_pid = program_map_pid[i];
-    pat->program[i].have_pmt = 0;  // Awaiting PMT.
-    state->pid_type[pat->program[i].pmt_pid] = PID_PSI;
+    new_programs[nprograms].program_number = program_number;
+    new_programs[nprograms].pmt_pid = pmt_pid;
+    nprograms++;
   }
 
-  // Update state to show we have parsed the PAT.
+  // Release old PMTs only after the replacement PAT has been fully parsed.
+  // This avoids writing a larger new PAT into storage sized for an older PAT.
+  release_pat (state, pat);
+  pat->program = new_programs;
+  pat->nprograms = nprograms;
+  pat->version = version;
   state->have_pat = 1;
+
+  // Every PMT PID listed by the PAT carries PSI rather than PES data.
+  for (i = 0; i < nprograms; i++) {
+    state->pid_type[new_programs[i].pmt_pid] = PID_PSI;
+  }
 
   return (EXIT_SUCCESS);
 }

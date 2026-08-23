@@ -16,53 +16,42 @@
 
 #include "sub.h"
 
-// Read a single line of text from a text file.
-// Returns -1 if EOF is encountered.
+// Read one text line. Carriage returns are discarded, newline is retained if
+// present, and the returned string is always NUL terminated. Overlong input
+// lines are consumed so the next call begins at the next real line.
 int
 readline (FILE *fi, char *line, int limit) {
 
-  int i, n;
+  int c;
+  size_t pos, capacity;
 
-  i = 0;  // i is pointer to byte in line.
-  while (i < limit) {
+  if (fi == NULL || line == NULL || limit <= 1) return -1;
+  capacity = (size_t) limit;
+  pos = 0;
 
-    // Grab next byte from file.
-    n = fgetc (fi);
-
-    // End of file reached.
-    // Tell calling function, by returning -1, that we're at end of file, so it won't call readline() again.
-    if (n == EOF) {
-
-      // If there's no end of line at the end of the file, ensure string termination.
-      if (i > 0) {
-        line[i] = 0;
-        return (0);
-      }
-      return (-1);
+  for (;;) {
+    c = fgetc (fi);
+    if (c == EOF) {
+      line[pos] = '\0';
+      return pos == 0 ? -1 : 0;
     }
 
-    // Found a carriage return. Ignore it.
-    if (n == '\r') {
-      continue;
+    if (c == '\r') continue;
+
+    if (pos + 1 < capacity) {
+      line[pos++] = (char) (unsigned char) c;
+      line[pos] = '\0';
     }
 
-    // Seems to be a valid character. Keep it.
-    line[i] = n;
-    i++;
+    if (c == '\n') return 0;
 
-    // Found a newline.
-    // Break out of loop since this is the end of the current line.
-    if (n == '\n') {
-      return (0);
+    if (pos + 1 == capacity) {
+      // The buffer is full. Consume the remainder of this physical line.
+      do {
+        c = fgetc (fi);
+      } while (c != '\n' && c != EOF);
+      line[pos] = '\0';
+      return 0;
     }
-
   }
-
-  // Advance to next line.
-  n = 0;
-  while ((n != '\n') && (n != EOF)) {
-    n = fgetc (fi);
-  }
-
-  return (0);
 }

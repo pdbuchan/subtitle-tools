@@ -1,4 +1,4 @@
-/*  Copyright (C) 2024-2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2024-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -21,988 +21,888 @@
 //          do require they appear in chronological order in the srt file.
 //          The SubRip output file is not corrected for this.
 
-// gcc -Wall ssa2srt-nostyles.c -o ssa2srt-nostyles
+// gcc -Wall ssa2srt-nostyles.c -lm -o ssa2srt-nostyles
 
 // Run without command line arguments to see usage notes.
 // Output: out.srt
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
-#include <math.h>  // For modf
+#include <limits.h>
+#include <ctype.h>
+#include <math.h>
 #include <errno.h>
 
 // Function prototypes
 int readline (FILE *, char *, int);
-int find_index (char *, char *, int *);
-int extract_string (char *, int, char, char *);
-int extract_int (char *, int, int *);
-int parse_time (char *, int *, int *, int *, int *);
-int parse_color (char *, FILE *);
+int read_ssa_line (FILE *, char *, int, int *);
+int find_index (const char *, const char *, int *);
+int extract_string (const char *, int, char, char *);
+int parse_time (const char *, int *, int *, int *, int *);
+int parse_color (const char *, FILE *);
 int fix_text (char *);
-char *allocate_strmem (int);
-char **allocate_strmemp (int);
-int *allocate_intmem (int);
+int write_text (const char *, char *, FILE *);
 
 // Set some symbolic constants.
-#define MAXLEN 1024  // Maximum number of characters per line
+#define MAXLEN 1024  // Maximum number of characters per physical line
 
 int
 main (int argc, char **argv) {
 
-  int i, j, eofile, len, sub, shh, smm, sss, sms, ehh, emm, ess, ems;
-  int istart, iend, itext;
-  int italflag, boldflag, underlineflag, strikeoutflag, colorflag;
-  char *temp, *filename, *string, *text, *format;
+  int eofile, sub, shh, smm, sss, sms, ehh, emm, ess, ems;
+  int istart, iend, itext, lineno, events_found, utf8bom, status;
+  char temp[MAXLEN], string[MAXLEN], text[MAXLEN];
+  const char *filename;
   FILE *fi, *fo;
-
-  // Alignments
-  //   {\an#} are override markup tags with numpad alignment positions.
-  //   {\a#} are override markup tags with 1,2,3 (bottom) with +4 (top) and +8 (mid)
-  // Italic override tags
-  //   {\i1} italics on (use <i> for srt)
-  //   {\i0} italics off (use <\i> for srt); {\i} is also handled, as it is sometimes encountered.
-  // Bold override tags
-  //   {\b1} bold on (use <b> for srt)
-  //   {\b0} bold off (use </b> for srt)
-  // Underline override tags
-  //   {\u1} bold on (use <u> for srt)
-  //   {\u0} bold off (use </u> for srt)
-  // Strikeout override tags
-  //   {\s1} strikeout on (use <s> for srt)
-  //   {\s0} strikeout off (use </s> for srt)
-
-  // Allocate memory for various arrays.
-  filename = allocate_strmem (MAXLEN);
+  unsigned char bombytes[4];
+  size_t nbom;
 
   // Process the command line arguments, if any.
   if (argc == 2) {
-    strncpy (filename, argv[1], MAXLEN);
+    filename = argv[1];
   } else {
     fprintf (stdout, "\nUsage: ./ssa2srt-nostyles inputfilename\n");
     fprintf (stdout, "       Output filename will be out.srt.\n\n");
-    free (filename);
     return (EXIT_SUCCESS);
   }
 
-  // Allocate memory for various arrays.
-  temp = allocate_strmem (MAXLEN);
-  string = allocate_strmem (MAXLEN);
-  text = allocate_strmem (MAXLEN);
-  format = allocate_strmem (MAXLEN);
-
   // Open existing SubStationAlpha file.
-  fi = fopen (filename, "r");
+  fi = fopen (filename, "rb");
   if (fi == NULL) {
     fprintf (stderr, "ERROR: Unable to open input SubStationAlpha file %s.\n", filename);
-    exit (EXIT_FAILURE);
+    return (EXIT_FAILURE);
   }
 
-  // Find Events in SSA file.
-  do {
+  // Check for a Unicode BOM. This converter operates on byte-oriented UTF-8
+  // text, so preserve UTF-8 and reject UTF-16/UTF-32 before parsing. Test the
+  // four-byte BOMs first because UTF-32LE begins with the UTF-16LE prefix FF FE.
+  memset (bombytes, 0, sizeof (bombytes));
+  nbom = fread (bombytes, 1, sizeof (bombytes), fi);
+  if (ferror (fi)) {
+    fprintf (stderr, "ERROR: Unable to read input SubStationAlpha file %s.\n", filename);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+  rewind (fi);
 
-    // Read line of text from input file.
-    memset (temp, 0, MAXLEN * sizeof (char));
-    if (readline (fi, temp, MAXLEN) == -1) {
-      break;  // Reached end of file.
+  utf8bom = 0;
+  if ((nbom >= 4U) && (bombytes[0] == 0x00U) && (bombytes[1] == 0x00U) && (bombytes[2] == 0xfeU) && (bombytes[3] == 0xffU)) {
+    fprintf (stderr, "ERROR: UTF-32 (BE) input is not supported; convert the SSA file to UTF-8 first.\n");
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+  if ((nbom >= 4U) && (bombytes[0] == 0xffU) && (bombytes[1] == 0xfeU) && (bombytes[2] == 0x00U) && (bombytes[3] == 0x00U)) {
+    fprintf (stderr, "ERROR: UTF-32 (LE) input is not supported; convert the SSA file to UTF-8 first.\n");
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+  if ((nbom >= 2U) && (bombytes[0] == 0xfeU) && (bombytes[1] == 0xffU)) {
+    fprintf (stderr, "ERROR: UTF-16 (BE) input is not supported; convert the SSA file to UTF-8 first.\n");
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+  if ((nbom >= 2U) && (bombytes[0] == 0xffU) && (bombytes[1] == 0xfeU)) {
+    fprintf (stderr, "ERROR: UTF-16 (LE) input is not supported; convert the SSA file to UTF-8 first.\n");
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+  if ((nbom >= 3U) && (bombytes[0] == 0xefU) && (bombytes[1] == 0xbbU) && (bombytes[2] == 0xbfU)) {
+    utf8bom = 1;
+    if (fseek (fi, 3L, SEEK_SET) != 0) {
+      fprintf (stderr, "ERROR: Unable to position input SubStationAlpha file %s.\n", filename);
+      fclose (fi);
+      return (EXIT_FAILURE);
     }
+  }
 
-  } while (strncmp (temp, "[Events]", 10) != 0);
+  lineno = 0;
+  events_found = 0;
 
-  // Find Format line of Events Section.
-  do {
-
-    // Read line of text from input file.
-    memset (temp, 0, MAXLEN * sizeof (char));
-    if (readline (fi, temp, MAXLEN) == -1) {
-      fprintf (stderr, "ERROR: Could not file the Events Format line.\n");
-      exit (EXIT_FAILURE);
+  // Find [Events] section.
+  while (!events_found) {
+    memset (temp, 0, sizeof (temp));
+    status = read_ssa_line (fi, temp, MAXLEN, &lineno);
+    if (status == -1) break;
+    if (status != 0) {
+      fclose (fi);
+      return (EXIT_FAILURE);
     }
+    if (strncmp (temp, "[Events]", 8) == 0) events_found = 1;
+  }
 
+  if (!events_found) {
+    fprintf (stderr, "ERROR: Cannot find [Events] section.\n");
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+
+  // Find Format line of Events section.
+  do {
+    memset (temp, 0, sizeof (temp));
+    status = read_ssa_line (fi, temp, MAXLEN, &lineno);
+    if (status == -1) {
+      fprintf (stderr, "ERROR: Could not find the Events Format line.\n");
+      fclose (fi);
+      return (EXIT_FAILURE);
+    }
+    if (status != 0) {
+      fclose (fi);
+      return (EXIT_FAILURE);
+    }
+    if ((temp[0] == '[') && (strncmp (temp, "Format:", 7) != 0)) {
+      fprintf (stderr, "ERROR: Events section has no Format line.\n");
+      fclose (fi);
+      return (EXIT_FAILURE);
+    }
   } while (strncmp (temp, "Format:", 7) != 0);
 
-    // Find Start index in Events Format.
-    if (!find_index (temp, "Start", &istart)) {
-      fprintf (stderr, "Cannot find Start in Events Format: %s\n", temp);
-      exit (EXIT_FAILURE);
-    } else {
-//      fprintf (stdout, "Start index in Events Format: %i\n", istart);
-    }
-
-    // Find End index in Events Format.
-    if (!find_index (temp, "End", &iend)) {
-      fprintf (stderr, "Cannot find End in Events Format: %s\n", temp);
-      exit (EXIT_FAILURE);
-    } else {
-//      fprintf (stdout, "End index in Events Format: %i\n", iend);
-    }
-
-    // Find Text index in Events Format.
-    if (!find_index (temp, "Text", &itext)) {
-      fprintf (stderr, "Cannot find Text in Events Format: %s\n", temp);
-      exit (EXIT_FAILURE);
-    } else {
-//      fprintf (stdout, "Text index in Events Format: %i\n", itext);
-    }
-
-  // Open output file.
-  fo = fopen ("out.srt", "r");
-  if (fo != NULL) {
-    fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
-    exit (EXIT_FAILURE);
+  // Find the fields required to convert Dialogue events.
+  if (!find_index (temp, "Start", &istart)) {
+    fprintf (stderr, "ERROR: Cannot find Start in Events Format: %s", temp);
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
-  fo = fopen ("out.srt", "w");
+  if (!find_index (temp, "End", &iend)) {
+    fprintf (stderr, "ERROR: Cannot find End in Events Format: %s", temp);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+  if (!find_index (temp, "Text", &itext)) {
+    fprintf (stderr, "ERROR: Cannot find Text in Events Format: %s", temp);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+
+  // Open output file. The "x" mode prevents accidental replacement.
+  errno = 0;
+  fo = fopen ("out.srt", "wx");
   if (fo == NULL) {
-    fprintf (stderr, "ERROR: Unable to open output file out.srt.\n");
-    exit (EXIT_FAILURE);
+    if (errno == EEXIST) {
+      fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
+    } else {
+      fprintf (stderr, "ERROR: Unable to open output file out.srt.\n");
+    }
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
 
-  // Loop through Dialogue events in SSA file and save subtitles to srt file.
+  // Preserve a UTF-8 BOM when one was present in the input file.
+  if (utf8bom) {
+    static const unsigned char utf8mark[3] = {0xefU, 0xbbU, 0xbfU};
+    if (fwrite (utf8mark, 1, sizeof (utf8mark), fo) != sizeof (utf8mark)) {
+      fprintf (stderr, "ERROR: Unable to write UTF-8 BOM to out.srt.\n");
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
+    }
+  }
+
+  // Loop through Dialogue events in the SSA file and save subtitles to SRT.
   sub = 1;
   eofile = 0;
   while (!eofile) {
 
     // Find next Dialogue line.
     do {
-
-      // Read line of text from input file.
-      memset (temp, 0, MAXLEN * sizeof (char));
-      if (readline (fi, temp, MAXLEN) == -1) {
-
-        // Reached end of file.
+      memset (temp, 0, sizeof (temp));
+      status = read_ssa_line (fi, temp, MAXLEN, &lineno);
+      if (status == -1) {
         eofile = 1;
         break;
       }
-    } while (strncmp (temp, "Dialogue: ", 10) != 0);
-    len = strnlen (temp, MAXLEN);  // Length of Dialogue line
-//fprintf (stdout, "Length of Dialogue line: %i\n", len);
+      if (status != 0) {
+        fclose (fi);
+        fclose (fo);
+        remove ("out.srt");
+        return (EXIT_FAILURE);
+      }
+    } while (strncmp (temp, "Dialogue:", 9) != 0);
+
     if (eofile) break;
 
-    // Subtitle number.
-    fprintf (fo, "%i\n", sub);
-//fprintf (stdout, "%i\n", sub);
-
-    // Extract Start time.
-    i = 0;  // Index of temp
-    j = 0;  // Comma count
-    while ((j != istart) && (i < len)) {
-      if (temp[i] == ',') j++;
-      i++;
+    // Extract and convert Start time.
+    if (extract_string (temp, istart, ',', string) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Cannot extract Start from Dialogue line %i: %s", lineno, temp);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
     }
-    memset (string, 0, MAXLEN * sizeof (char));
-    j = 0;  // Index of string
-    while (i < len) {
-      if (temp[i] != ',') {
-        string[j] = temp[i];
-        i++;
-        j++;
-      } else {
-        break;
-      }
-    }
-//fprintf (stdout, "Start: %s\n", string);
-    parse_time (string, &shh, &smm, &sss, &sms);
-
-    // Extract End time.
-    i = 0;  // Index of temp
-    j = 0;  // Comma count
-    while ((j != iend) && (i < len)) {
-      if (temp[i] == ',') j++;
-      i++;
-    }
-    memset (string, 0, MAXLEN * sizeof (char));
-    j = 0;  // Index of string
-    while (i < len) {
-      if (temp[i] != ',') {
-        string[j] = temp[i];
-        i++;
-        j++;
-      } else {
-        break;
-      }
-    }
-//fprintf (stdout, "End: %s\n", string);
-    parse_time (string, &ehh, &emm, &ess, &ems);
-
-    // Write subtitle start and end times.
-    fprintf (fo, "%02i:%02i:%02i,%03i --> %02i:%02i:%02i,%03i\n", shh, smm, sss, sms, ehh, emm, ess, ems);
-
-    // Extract Text.
-    extract_string (temp, itext, '\n', text);
-
-    // Correct erroneous SubRip tags in Text.
-    fix_text (text);
-
-    len = strnlen (text, MAXLEN);  // Length of Text portion of Dialogue line.
-//fprintf (stdout, "Text (ssa): %s\n", text);
-
-    // Loop through chars of current Text.
-    i = 0;  // Index of current Dialogue's Text, which is array text.
-    colorflag = 0;  // Default to no color markup; this flag is needed in order to add </font> if {\c} missing from Text.
-    while (i < len) {
-
-      // Initialize flags used for correcting SSA override format errors of current Text line.
-      // Sometimes closing override tags are missing.
-      boldflag = 0;
-      italflag = 0;
-      underlineflag = 0;
-      strikeoutflag = 0;
-
-      // Line-feed found.
-      if ((text[i] == '\\') && ((text[i+1] == 'n') || (text[i+1] == 'N'))) {
-          fprintf (fo, "\n");
-          i += 2;
-
-      /* Process any override formats if { found.
-         All override formats begin with {\
-         There could be multiple formats within {}, each preceded by a \
-      */
-      } else if (strncmp (&text[i], "{\\", 2) == 0) {
-
-        i += 2;  /* Move past {\  */
-
-        // Process all formats within current {}.
-        for (;;) {
-
-          // Italics on
-          if (strncmp (&text[i], "i1", 2) == 0) {
-            italflag = 1;
-            fprintf (fo, "<i>");
-            i += 2;  // Move past i1
-
-          // Italics off
-          } else if (strncmp (&text[i], "i0", 2) == 0) {
-            italflag = 0;
-            fprintf (fo, "</i>");
-            i += 2;  // Move past i0
-
-          // Italics off (shortform)
-          } else if (strncmp (&text[i], "i}", 2) == 0) {
-            italflag = 0;
-            fprintf (fo, "</i>");
-            i += 2;  // Move past i}
-            break;  // Leave {} loop.
-
-          // Bold on
-          } else if (strncmp (&text[i], "b1", 2) == 0) {
-            boldflag = 1;
-            fprintf (fo, "<b>");
-            i += 2;  // Move past b1
-
-          // Bold off
-          } else if (strncmp (&text[i], "b0", 2) == 0) {
-            boldflag = 0;
-            fprintf (fo, "</b>");
-            i += 2;  // Move past b0
-
-          // Underline on
-          } else if (strncmp (&text[i], "u1", 2) == 0) {
-            underlineflag = 1;
-            fprintf (fo, "<u>");
-            i += 2;  // Move past u1
-
-          // Underline off
-          } else if (strncmp (&text[i], "u0", 2) == 0) {
-            underlineflag = 0;
-            fprintf (fo, "</u>");
-            i += 2;  // Move past u0
-
-          // StrikeOut on
-          } else if (strncmp (&text[i], "s1", 2) == 0) {
-            strikeoutflag = 1;
-            fprintf (fo, "<s>");
-            i += 2;  // Move past s1
-
-          // StrikeOut off
-          } else if (strncmp (&text[i], "s0", 2) == 0) {
-            strikeoutflag = 0;
-            fprintf (fo, "</s>");
-            i += 2;  // Move past s0
-
-          // Primary font color on
-          } else if (strncmp (&text[i], "c&H", 3) == 0) {
-            colorflag = 1;
-
-            // Copy color definition to temporary string.
-            memset (temp, 0, MAXLEN * sizeof (char));
-            i++;  // Move past c
-            j = 0;  // Index of temp
-            do {
-              temp[j] = text[i];
-              i++;
-              j++;
-              if (i == len) break;
-            } while (text[i] != '&');
-            temp[j] = '&';
-            i++;
-            parse_color (temp, fo);  // Parse color string; save to output file.
-
-          // Font color off
-          // Exit {} loop.
-          } else if (strncmp (&text[i], "c}", 2) == 0) {
-            colorflag = 0;
-            fprintf (fo, "</font>");
-            i += 2;  // Move past c}
-            break;  // Leave {} loop.
-
-          // Alignment
-          } else if (text[i] == 'a') {
-
-            fprintf (fo, "{\\a");
-            i++;  // Move past a
-
-            // Copy alignment, since srt format is same as ssa format, until } or another \ is encountered.
-            // Could be {\a or {\an type of alignment format.
-            while (i < len) {
-              if ((text[i] != '}') && (text[i] != '\\')) {
-                fprintf (fo, "%c", text[i]);
-                i++;
-              } else {
-                break;
-              }
-            }
-
-            // No more formats within these {}.
-            if (text[i] == '}') {
-              fprintf (fo, "}");
-              i++;  // Move past }
-              break;  // Leave {} loop.
-
-            // More formats are within these {}.
-            } else if (text[i] == '\\') {
-              fprintf (fo, "}");  // Close alignment format.
-              i++;  /* Move past \   */
-              continue;
-            }
-
-          // pos function override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "pos", 3) == 0) {
-            i += 3;  // Move past pos
-            // Move past location specification (#,#)
-            for (;;) {
-              if (i >= len) break;
-              if (text[i] != ')') {
-                i++;
-              } else {
-                i++;  // Move past )
-                break;
-              }
-            }
-
-          // Primary fill color override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "1c&H", 4) == 0) {
-            i += 5 + 6 + 1;  // Move past \1c&Hbbggrr&
-
-          // Secondary fill color override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "\\2c&H", 5) == 0) {
-            i += 4 + 6 + 1;  // Move past 2c&Hbbggrr&
-
-          // Border color override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "3c&H", 4) == 0) {
-            i += 4 + 6 + 1;  // Move past 3c&Hbbggrr&
-
-          // Shadow color override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "4c&H", 4) == 0) {
-            i += 4 + 6 + 1;  // Move past 4c&Hbbggrr&
-
-          // Alpha override; not implemented in srt, so ignore it.
-          // Note that it is written "alpha" to differentiate from alignment formats.
-          } else if (strncmp (&text[i], "alpha&H", 7) == 0) {
-            i += 7 + 2 + 1;  // Move past alpha&Haa&
-
-          // Primary fill alpha override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "1a&H", 4) == 0) {
-            i += 4 + 2 + 1;  // Move past 1a&HFF&
-
-          // Secondary fill alpha override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "2a&H", 4) == 0) {
-            i += 4 + 2 + 1;  // Move past 2a&HFF&
-
-          // Border alpha override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "3a&H", 4) == 0) {
-            i += 4 + 2 + 1;  // Move past 3a&HFF&
-
-          // Shadow alpha override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "4a&H", 4) == 0) {
-            i += 4 + 2 + 1;  // Move past 4a&HFF&
-
-          // No more formats within current {}.
-          } else if (text[i] == '}') {
-            i++;
-            break;
-
-          // More formats to follow within these {}.
-          } else if (text[i] == '\\') {
-            i++;  /* Move past \   */
-            continue;
-
-          // Unknown format encountered within {}.
-          } else {
-            fprintf (stderr, "Unknown SSA format encountered in text:\n");
-            fprintf (stderr, "%s\n", text);
-            exit (EXIT_FAILURE);
-          }
-
-        }  // End for loop within {}
-
-      }  // End if SSA format found.
-
-      // Regular text is found.
-      while (i < len) {
-        if ((text[i] != '{') && (text[i] != '\\')) {
-          fprintf (fo, "%c", text[i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-
-    }  // End for loop through chars of Text
-
-    // Fix any SSA input file formatting errors in current Text.
-
-    // Strikeout: Add closing </s> if {\s0} is missing.
-    if (strikeoutflag == 1) {
-      fprintf (fo, "</s>");
+    if (parse_time (string, &shh, &smm, &sss, &sms) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Invalid SSA start timestamp '%s' on line %i.\n", string, lineno);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
     }
 
-    // Underline: Add closing </u> if {\u0} is missing.
-    if (underlineflag == 1) {
-      fprintf (fo, "</u>");
+    // Extract and convert End time.
+    if (extract_string (temp, iend, ',', string) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Cannot extract End from Dialogue line %i: %s", lineno, temp);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
+    }
+    if (parse_time (string, &ehh, &emm, &ess, &ems) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Invalid SSA end timestamp '%s' on line %i.\n", string, lineno);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
     }
 
-    // Italics: Add closing </i> if {\i0} or {\i} is missing.
-    if (italflag == 1) {
-      fprintf (fo, "</i>");
+    // Extract Text. Because Text may contain commas, extract_string() returns
+    // the remainder of the physical line for this field.
+    if (extract_string (temp, itext, '\n', text) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Cannot extract Text from Dialogue line %i: %s", lineno, temp);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
     }
 
-    // Bold: Add closing </b> if {\b0} is missing.
-    if (boldflag == 1) {
-      fprintf (fo, "</b>");
+    // Correct whitespace mistakes in any existing SubRip-style tags.
+    if (fix_text (text) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Unable to correct markup on Dialogue line %i.\n", lineno);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
     }
 
-   // Font color: Add closing </font> if {\c} is missing.
-    if (colorflag == 1) {
-      fprintf (fo, "</font>");
+    if (fprintf (fo, "%i\n", sub) < 0 ||
+        fprintf (fo, "%02i:%02i:%02i,%03i --> %02i:%02i:%02i,%03i\n", shh, smm, sss, sms, ehh, emm, ess, ems) < 0) {
+      fprintf (stderr, "ERROR: Unable to write subtitle %i to out.srt.\n", sub);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
     }
 
-    sub++;  // Increment subtitle number.
-    fprintf (fo, "\n\n");
+    if (write_text (text, temp, fo) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Unable to convert text for subtitle %i.\n", sub);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
+    }
 
-  }  // End while !eofile
+    if (fprintf (fo, "\n\n") < 0) {
+      fprintf (stderr, "ERROR: Unable to write subtitle %i to out.srt.\n", sub);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      return (EXIT_FAILURE);
+    }
+
+    sub++;
+  }
 
   fprintf (stdout, "\n%i subtitles found in SSA input file.\n\n", sub - 1);
 
-  // Close input and output files.
-  fclose (fi);
-  fclose (fo);
-
-  // Free allocated memory.
-  free (temp);
-  free (filename);
-  free (string);
-  free (text);
-  free (format);
+  // Check output and close files.
+  if (ferror (fo)) {
+    fprintf (stderr, "ERROR: Failed while writing output file out.srt.\n");
+    fclose (fi);
+    fclose (fo);
+    remove ("out.srt");
+    return (EXIT_FAILURE);
+  }
+  if (fclose (fi) != 0) {
+    fprintf (stderr, "ERROR: Unable to close input file %s.\n", filename);
+    fclose (fo);
+    remove ("out.srt");
+    return (EXIT_FAILURE);
+  }
+  if (fclose (fo) != 0) {
+    fprintf (stderr, "ERROR: Unable to close output file out.srt.\n");
+    remove ("out.srt");
+    return (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }
 
-// Read a single line of text from a text file.
-// Returns -1 if EOF is encountered.
+// Read a single line of text from a subtitle/text file.
+// The terminating line-feed is retained when one is present in the input.
+// Carriage returns are discarded so LF and CRLF input are handled identically.
+//
+// Returns:
+//   0  - line successfully read
+//  -1  - EOF encountered before any characters were read
+//  -2  - line is too long for the supplied buffer
+//  -3  - invalid arguments or input error
 int
 readline (FILE *fi, char *line, int limit) {
 
-  int i, n;
+  int ch, i;
 
-  i = 0;  // i is pointer to byte in line.
-  while (i < limit) {
+  if ((fi == NULL) || (line == NULL) || (limit < 2)) {
+    return (-3);
+  }
 
-    // Grab next byte from file.
-    n = fgetc (fi);
+  i = 0;
+  for (;;) {
+
+    ch = fgetc (fi);
 
     // End of file reached.
-    // Tell calling function, by returning -1, that we're at end of file, so it won't call readline() again.
-    if (n == EOF) {
+    if (ch == EOF) {
 
-      // If there's no end of line at the end of the file, ensure string termination.
-      if (i > 0) {
-        line[i] = 0;
-        return (0);
+      // File stream error encountered.
+      if (ferror (fi)) {
+        line[0] = '\0';
+        return (-3);
       }
-      return (-1);
-    }
 
-    // Found a carriage return. Ignore it.
-    if (n == '\r') {
-      continue;
-    }
+      // No characters were read for this line.
+      if (i == 0) {
+        line[0] = '\0';
+        return (-1);
+      }
 
-    // Found a newline. Change to 0 for string termination.
-    // Break out of loop since this is the end of the current line.
-    if (n == '\n') {
-      line[i] = 0;  // Replace with 0 for string termination.
+      // Accept a final line that does not end with a line-feed.
+      line[i] = '\0';
       return (0);
     }
 
-    // Seems to be a valid character. Keep it.
-    line[i] = n;
-    i++;
+    // Ignore carriage returns so CRLF input is treated as LF input.
+    if (ch == '\r') {
+      continue;
+    }
+
+    // Found a line-feed. Retain it.
+    if (ch == '\n') {
+
+      // Line too long for supplied buffer.
+      if (i >= (limit - 1)) {
+        line[limit - 1] = '\0';
+        return (-2);
+      }
+
+      line[i++] = '\n';
+      line[i] = '\0';
+      return (0);
+    }
+
+    // Reserve one byte for the terminating null character. If the line is too
+    // long, discard the rest of the physical line so the next call starts at
+    // the beginning of the following line.
+    if (i >= (limit - 1)) {
+      line[limit - 1] = '\0';
+      while ((ch = fgetc (fi)) != '\n' && ch != EOF) {
+      }
+      if ((ch == EOF) && ferror (fi)) {
+        return (-3);
+      }
+      return (-2);
+    }
+
+    line[i++] = (char) ch;
+  }
+}
+
+// Read one SSA line and add a line number to readline() diagnostics.
+// The readline() status is returned unchanged so callers can clean up any
+// partially created output before failing.
+int
+read_ssa_line (FILE *fi, char *line, int limit, int *lineno) {
+
+  int status;
+
+  if (lineno == NULL) return (-3);
+
+  status = readline (fi, line, limit);
+  if (status == 0) {
+    (*lineno)++;
+  } else if (status == -2) {
+    fprintf (stderr, "ERROR: Line %i of the SSA file does not fit in the %d-byte input buffer.\n", *lineno + 1, limit);
+  } else if (status == -3) {
+    fprintf (stderr, "ERROR: Unable to read line %i of the SSA file.\n", *lineno + 1);
   }
 
-  // Advance to next line.
-  n = 0;
-  while ((n != '\n') && (n != EOF)) {
-    n = fgetc (fi);
+  return (status);
+}
+
+// Find the zero-based index of an exact element in a comma-separated Format line.
+// Returns 0 if not found, 1 if found.
+int
+find_index (const char *text, const char *element, int *index) {
+
+  const char *p, *start, *end;
+  size_t elemlen, tokenlen;
+  int current;
+
+  if ((text == NULL) || (element == NULL) || (index == NULL)) return (0);
+
+  p = strchr (text, ':');
+  if (p == NULL) return (0);
+  p++;
+
+  elemlen = strlen (element);
+  current = 0;
+
+  while ((*p != '\0') && (*p != '\n')) {
+
+    while ((*p == ' ') || (*p == '\t')) p++;
+    start = p;
+
+    while ((*p != '\0') && (*p != '\n') && (*p != ',')) p++;
+    end = p;
+    while ((end > start) && ((end[-1] == ' ') || (end[-1] == '\t'))) end--;
+
+    tokenlen = (size_t) (end - start);
+    if ((tokenlen == elemlen) && (strncmp (start, element, elemlen) == 0)) {
+      *index = current;
+      return (1);
+    }
+
+    if (*p == ',') {
+      p++;
+      current++;
+    }
   }
 
   return (0);
 }
 
-// Find index of element within line of comma-separated text.
-// Returns 0 if not found, 1 if found.
+// Extract a string element from a comma-separated line, given its zero-based index.
+// If termination is '\n', the remainder of the physical line is returned; this is
+// used for the Text field because subtitle text may itself contain commas.
 int
-find_index (char *text, char *element, int *index) {
+extract_string (const char *text, int index, char termination, char *string) {
 
-  int i, j, len, elemlen, found;
+  const char *p, *start, *end;
+  size_t len;
+  int current;
 
-  len = strnlen (text, MAXLEN);
-  elemlen = strnlen (element, MAXLEN);
+  if ((text == NULL) || (string == NULL) || (index < 0)) return (EXIT_FAILURE);
 
-  // Find index.
-  found = 0;  // Default to element not found.
-  *index = 0;
-  i = 0;  // Index of temp
-  while (i < len) {
-    if (strncmp (&text[i], element, elemlen) == 0) {
-      found = 1;
-      break;
-    }
-    i++;
-  }  // End while
-  if (found) {
-    for (j=i; j>=0; j--) {
-      if (text[j] == ',') (*index)++;
-    }
-  }  // End if found
+  p = strchr (text, ':');
+  if (p == NULL) return (EXIT_FAILURE);
+  p++;
+  while ((*p == ' ') || (*p == '\t')) p++;
 
-  return (found);
-}
-
-// Extract a string element from a comma-separated line, given index.
-int
-extract_string (char *text, int index, char termination, char *string) {
-
-  int i, j, c, len;
-
-  len = strnlen (text, MAXLEN);
-
-  i = 0;  // Index of text
-
-  // Skip line title ("Format:", Dialogue:", etc.)
-  while (i < len) {
-    if (text[i] != ':') {
-      i++;
-    } else {
-      break;
-    }
-  }
-  i += 2;  // Move past ": "
-
-  // Locate element using index.
-  j = 0;  // Index of string
-  c = 0;  // Count of commas
-  while ((i < len) && (c < index)) {
-    if (text[i] == ',') c++;
-    i++;
+  current = 0;
+  while (current < index) {
+    p = strchr (p, ',');
+    if (p == NULL) return (EXIT_FAILURE);
+    p++;
+    current++;
   }
 
-  // Extract element until next comma or end of line is encountered.
-  memset (string, 0, MAXLEN * sizeof (char));
+  start = p;
+  end = start;
 
-  while (i < len) {
-    if ((text[i] != termination) && (text[i] != '\n')) {
-      string[j] = text[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
-  }
-
-  return (EXIT_SUCCESS);
-}
-
-// Extract an integer element from a comma-separated line, given index.
-int
-extract_int (char *text, int index, int *value) {
-
-  int i, j, c, len;
-  char *string, *endptr;
-
-  // Allocate memory for various arrays.
-  string = allocate_strmem (MAXLEN);
-
-  len = strnlen (text, MAXLEN);
-  
-  i = 0;  // Index of text
-
-  // Skip line title ("Format:", Dialogue:", etc.)
-  while (i < len) {
-    if (text[i] != ':') {
-      i++;
-    } else {
-      break;
-    }
-  }
-  i += 2;  // Move past ": "
-  
-  // Locate element using index.
-  j = 0;  // Index of string
-  c = 0;  // Count of commas
-  while ((i < len) && (c < index)) {
-    if (text[i] == ',') c++;
-    i++;
-  }
-
-  // Extract element until next comma is encountered.
-  memset (string, 0, MAXLEN * sizeof (char));
-
-  while (i < len) {
-    if (text[i] != ',') {
-      string[j] = text[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
-  }
-
-  errno = 0;
-  (*value) = (int) strtol (string, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-    fprintf (stderr, "ERROR: Cannot make integer of string: %s\n", string);
-    exit (EXIT_FAILURE);
-  }
-
-  // Free allocated memory.
-  free (string);
-
-  return (EXIT_SUCCESS);
-}
-
-// Parse string containing timestamp in SSA format.
-int
-parse_time (char *string, int *hh, int *mm, int *ss, int *ms) {
-
-  int i, j, len;
-  double dsec, integral, fractional;
-  char *temp, *endptr;
-
-  temp = allocate_strmem (MAXLEN);
-
-  len = strnlen (string, MAXLEN);
-
-  i = 0;  // Index of string
-
-  // Extract hours.
-  j = 0;  // Index of temp
-  while (i < len) {
-    if (string[i] != ':') {
-      temp[j] = string[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
-  }
-  errno = 0;
-  *hh = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-    fprintf (stderr, "ERROR: Cannot make integer of string: %s\n", temp);
-    fprintf (stderr, "       %s\n", string);
-    exit (EXIT_FAILURE);
-  }
-  i++;
-
-  // Extract minutes.
-  memset (temp, 0, MAXLEN * sizeof (char));
-  j = 0;  // Index of temp
-  while (i < len) {
-    if (string[i] != ':') {
-      temp[j] = string[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
-  }
-  errno = 0;
-  *mm = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-    fprintf (stderr, "ERROR: Cannot make integer of string: %s\n", temp);
-    fprintf (stderr, "       %s\n", string);
-    exit (EXIT_FAILURE);
-  }
-  i++;
-
-  // Extract seconds and milliseconds.
-  memset (temp, 0, MAXLEN * sizeof (char));
-  j = 0;  // Index of temp
-  while (i < len) {
-    if (string[i] != ',') {
-      temp[j] = string[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
-  }
-  errno = 0;
-  dsec = strtod (temp, &endptr);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-    fprintf (stderr, "ERROR: Cannot make double of string: %s\n", temp);
-    fprintf (stderr, "       %s\n", string);
-    exit (EXIT_FAILURE);
-  }
-  fractional = modf (dsec, &integral);
-  *ms = (int) ((fractional * 1000.0) + 0.0001);
-  *ss = (int) integral;
-
-  // Free allocated memory.
-  free (temp);
-
-  return (EXIT_SUCCESS);
-}
-
-// Parse string containing color definition.
-// Color definition is extracted as string because format color values are expressed in decimal or hexadecimal.
-//   Hexadecimal:
-//     BGR format as &HBBGGRR& or ABGR (with alpha channel) as &HAABBGGRR&. 
-//   Decimal:
-//     - Convert to Hexadecimal: e.g., The decimal value 65535 converts to hex as 0000FFFF.
-//     - Extract Color Components:
-//     - Alpha (A): The first two characters (00), indicating fully transparent.
-//     - Blue (B): The next two characters (00), indicating no blue.
-//     - Green (G): The next two characters (FF), indicating full green.
-//     - Red (R): The last two characters (FF), indicating full red.
-//     - Combining these components, the color represented by 65535 is a fully opaque yellow (since red + green = yellow).
-int
-parse_color (char *string, FILE *fo) {
-
-  int i, c, dec, len;
-  char *hexstring, *endptr;
-
-  // Allocate memory for various arrays.
-  hexstring = allocate_strmem (MAXLEN);
-
-  len = strnlen (string, MAXLEN);
-
-  fprintf (fo, "<font color=\"#");
-
-  // Hexadecimal format.
-  if (strncmp (string, "&H", 2) == 0) {
-
-    i = 2;  // Index of string; skip &H
-    c = 0;
-    while (i < len) {
-      if (string[i] != '&') {
-        c++;  // Count digits
-        i++;
-      } else {
-        break;
-      }
-    }
-
-    // Hexadecimal BGR format.
-    i = 0;  // Index of string;
-    if (c == 6) {
-      i += 2;  // Move past &H
-
-    // Hexadecimal ABGR format.
-    // Ignore alpha since it isn't implemented in SubRip format.
-    } else if (c == 8) { 
-      i += 4;  // Move past &HAA
-
-    } else {  
-      fprintf (stderr, "ERROR: Unknown color definition: %s\n", string);
-      exit (EXIT_FAILURE);
-            
-    }  // End if BGR or ABGR
-
-    // Extract as RGB for SubRip.
-    fprintf (fo, "%c", string[i+4]);  // R left-digit
-    fprintf (fo, "%c", string[i+5]);  // R right-digit
-    fprintf (fo, "%c", string[i+2]);  // G left-digit
-    fprintf (fo, "%c", string[i+3]);  // G right-digit
-    fprintf (fo, "%c", string[i]);    // B left-digit
-    fprintf (fo, "%c", string[i+1]);  // B right-digit
-    fprintf (fo, "\">");
-
-  // Decimal format.
+  if (termination == '\n') {
+    while ((*end != '\0') && (*end != '\n')) end++;
   } else {
-    i = 0;  // Index of string
-    errno = 0;
-    dec = (int) strtol (string, &endptr, 10);
-    if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-      fprintf (stderr, "ERROR: Cannot make integer of string: %s\n", string);
-      exit (EXIT_FAILURE);
+    while ((*end != '\0') && (*end != '\n') && (*end != termination)) end++;
+  }
+
+  len = (size_t) (end - start);
+  if (len >= MAXLEN) return (EXIT_FAILURE);
+
+  memcpy (string, start, len);
+  string[len] = '\0';
+
+  return (EXIT_SUCCESS);
+}
+
+// Parse a timestamp in SSA/ASS form h:mm:ss.cc.
+// Other fractional-second precisions are accepted and rounded to milliseconds.
+int
+parse_time (const char *string, int *hh, int *mm, int *ss, int *ms) {
+
+  const char *p;
+  char *endptr;
+  long hours, minutes;
+  double seconds;
+  long total_in_minute;
+
+  if ((string == NULL) || (hh == NULL) || (mm == NULL) || (ss == NULL) || (ms == NULL)) {
+    return (EXIT_FAILURE);
+  }
+
+  p = string;
+  while (isspace ((unsigned char) *p)) p++;
+
+  errno = 0;
+  hours = strtol (p, &endptr, 10);
+  if ((errno == ERANGE) || (endptr == p) || (*endptr != ':') || (hours < 0) || (hours > INT_MAX)) {
+    return (EXIT_FAILURE);
+  }
+  p = endptr + 1;
+
+  errno = 0;
+  minutes = strtol (p, &endptr, 10);
+  if ((errno == ERANGE) || (endptr == p) || (*endptr != ':') || (minutes < 0) || (minutes > 59)) {
+    return (EXIT_FAILURE);
+  }
+  p = endptr + 1;
+
+  errno = 0;
+  seconds = strtod (p, &endptr);
+  if ((errno == ERANGE) || (endptr == p) || !isfinite (seconds) || (seconds < 0.0) || (seconds >= 60.0)) {
+    return (EXIT_FAILURE);
+  }
+
+  while (isspace ((unsigned char) *endptr)) endptr++;
+  if (*endptr != '\0') return (EXIT_FAILURE);
+
+  // Round to the nearest millisecond, then normalize a possible carry.
+  total_in_minute = lround (seconds * 1000.0);
+  if (total_in_minute >= 60000L) {
+    total_in_minute -= 60000L;
+    minutes++;
+    if (minutes == 60) {
+      minutes = 0;
+      hours++;
+      if (hours > INT_MAX) return (EXIT_FAILURE);
     }
-    sprintf (hexstring, "%08X", dec);  // As hexadecimal ABGR format.
+  }
 
-    // Extract as RGB for SubRip.
-    i += 2;  // Ignore alpha since it isn't implemented in SubRip format.
-    fprintf (fo, "%c", hexstring[i+4]);  // R left-digit
-    fprintf (fo, "%c", hexstring[i+5]);  // R right-digit
-    fprintf (fo, "%c", hexstring[i+2]);  // G left-digit
-    fprintf (fo, "%c", hexstring[i+3]);  // G right-digit
-    fprintf (fo, "%c", hexstring[i]);    // B left-digit
-    fprintf (fo, "%c", hexstring[i+1]);  // B right-digit
-    fprintf (fo, "\">");
+  *hh = (int) hours;
+  *mm = (int) minutes;
+  *ss = (int) (total_in_minute / 1000L);
+  *ms = (int) (total_in_minute % 1000L);
 
-  }  // End if hexadecimal or decimal color definition
+  return (EXIT_SUCCESS);
+}
 
-  // Free allocated memory.
-  free (hexstring);
+// Parse an SSA/ASS color definition and write the equivalent SubRip font tag.
+// Hexadecimal colors are BGR (&HBBGGRR) or ABGR (&HAABBGGRR). Decimal
+// values are interpreted as the same 32-bit ABGR representation; negative
+// decimal values are accepted using their two's-complement 32-bit form.
+int
+parse_color (const char *string, FILE *fo) {
+
+  char digits[9];
+  const char *p, *end;
+  char *endptr;
+  size_t ndigits;
+  unsigned long hexvalue;
+  long long decimal;
+  uint32_t value;
+  unsigned int r, g, b;
+
+  if ((string == NULL) || (fo == NULL)) return (EXIT_FAILURE);
+
+  while (isspace ((unsigned char) *string)) string++;
+  if (*string == '\0') return (EXIT_FAILURE);
+
+  if ((string[0] == '&') && ((string[1] == 'H') || (string[1] == 'h'))) {
+
+    p = string + 2;
+    end = p;
+    while (isxdigit ((unsigned char) *end)) end++;
+    ndigits = (size_t) (end - p);
+
+    if ((ndigits != 6U) && (ndigits != 8U)) return (EXIT_FAILURE);
+
+    while (isspace ((unsigned char) *end)) end++;
+    if (*end == '&') {
+      end++;
+      while (isspace ((unsigned char) *end)) end++;
+    }
+    if (*end != '\0') return (EXIT_FAILURE);
+
+    memcpy (digits, p, ndigits);
+    digits[ndigits] = '\0';
+
+    errno = 0;
+    hexvalue = strtoul (digits, &endptr, 16);
+    if ((errno == ERANGE) || (*endptr != '\0') || (hexvalue > UINT32_MAX)) {
+      return (EXIT_FAILURE);
+    }
+    value = (uint32_t) hexvalue;
+
+  } else {
+
+    errno = 0;
+    decimal = strtoll (string, &endptr, 10);
+    if ((errno == ERANGE) || (endptr == string)) return (EXIT_FAILURE);
+
+    while (isspace ((unsigned char) *endptr)) endptr++;
+    if (*endptr != '\0') return (EXIT_FAILURE);
+
+    if ((decimal < (long long) INT32_MIN) || (decimal > (long long) UINT32_MAX)) {
+      return (EXIT_FAILURE);
+    }
+
+    if (decimal < 0) {
+      value = (uint32_t) (int32_t) decimal;
+    } else {
+      value = (uint32_t) decimal;
+    }
+  }
+
+  // SSA/ASS stores BGR in the low 24 bits.
+  r = (unsigned int) (value & UINT32_C (0xff));
+  g = (unsigned int) ((value >> 8) & UINT32_C (0xff));
+  b = (unsigned int) ((value >> 16) & UINT32_C (0xff));
+
+  if (fprintf (fo, "<font color=\"#%02X%02X%02X\">", r, g, b) < 0) {
+    return (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }
 
 // Fix erroneous SubRip tags in a line of text.
-// Note that < or > could appear in a SubRip (i.e., srt) file as intended displayable subtitle text
-// so we check if a < is eventually followed by a >. We do not compare against all possible tag names.
+// Whitespace immediately after '<' or after '</' is removed only if a later
+// '>' exists, so a literal '<' in subtitle text is left alone.
 int
 fix_text (char *text) {
 
-  int i, j, k, len;
-  char *temp;
+  char temp[MAXLEN];
+  size_t i, j, k, len;
 
-  // Allocate memory for various arrays.
-  temp = allocate_strmem (MAXLEN);
+  if (text == NULL) return (EXIT_FAILURE);
 
-  len = strnlen (text, MAXLEN);
+  len = strlen (text);
+  i = 0U;
+  j = 0U;
 
-  // Whitespace is not allowed between < and tag name, and </ and tag name.
-  i = 0;  // Index of text
-  j = 0;  // Index of temp
   while (i < len) {
 
-    // Found a possible opening of SubRip format tag.
     if (text[i] == '<') {
-      temp[j] = text[i];
-      i++;  // Move past <
-      j++;
+      k = i + 1U;
+      while ((k < len) && (text[k] != '>')) k++;
 
-      // Check if a > later follows.
-      k = i;
-      while (k < len) {
+      if (k < len) {
+        if (j >= (MAXLEN - 1U)) return (EXIT_FAILURE);
+        temp[j++] = '<';
+        i++;
 
-        // Found a >, so we probably do have a markup tag.
-        if (text[k] == '>') {
+        while ((i < len) && (text[i] == ' ')) i++;
+        if ((i < len) && (text[i] == '/')) {
+          if (j >= (MAXLEN - 1U)) return (EXIT_FAILURE);
+          temp[j++] = '/';
+          i++;
+          while ((i < len) && (text[i] == ' ')) i++;
+        }
+        continue;
+      }
+    }
 
-          // Skip any whitespace before tag name or /
-          while (i < len) {
-            if (text[i] == ' ') {
-              i++;
-            } else {
-              break;
-            }
-          }
-
-          // Skip any whitespace after / but before tag name.
-          if (text[i] == '/') {
-            temp[j] = text[i];
-            i++;  // Move past /
-            j++;
-            while (i < len) {
-              if (text[i] == ' ') {
-                i++;
-              } else {
-                break;
-              }
-            }
-          }
-
-          break;
-        }  // End if found >
-
-        k++;
-      }  // End while looking for >
-    }  // End if found <
-
-    temp[j] = text[i];
-    i++;
-    j++;
+    if (j >= (MAXLEN - 1U)) return (EXIT_FAILURE);
+    temp[j++] = text[i++];
   }
 
-  // Replace text with cleaned-up version in temp.
-  memset (text, 0, MAXLEN * sizeof (char));
-  memcpy (text, temp, MAXLEN * sizeof (char));
-
-  // Free allocae memory.
-  free (temp);
-
+  temp[j] = '\0';
+  memcpy (text, temp, j + 1U);
   return (EXIT_SUCCESS);
 }
 
-// Allocate memory for an array of chars.
-char *
-allocate_strmem (int len) {
+// Convert SSA/ASS override markup embedded in one Dialogue Text field.
+int
+write_text (const char *text, char *temp, FILE *fo) {
 
-  void *tmp;
+  int i, j, len;
+  int italflag, boldflag, underlineflag, strikeoutflag, colorflag;
 
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
-    exit (EXIT_FAILURE);
+  if ((text == NULL) || (temp == NULL) || (fo == NULL)) return (EXIT_FAILURE);
+
+  len = (int) strlen (text);
+  i = 0;
+  colorflag = 0;
+  boldflag = 0;
+  italflag = 0;
+  underlineflag = 0;
+  strikeoutflag = 0;
+
+  while (i < len) {
+
+    // SSA/ASS explicit line break.
+    if ((text[i] == '\\') && ((i + 1) < len) &&
+        ((text[i+1] == 'n') || (text[i+1] == 'N'))) {
+      if (fputc ('\n', fo) == EOF) return (EXIT_FAILURE);
+      i += 2;
+
+    // SSA/ASS hard space. SubRip has no direct equivalent.
+    } else if ((text[i] == '\\') && ((i + 1) < len) && (text[i+1] == 'h')) {
+      if (fputc (' ', fo) == EOF) return (EXIT_FAILURE);
+      i += 2;
+
+    // Override block.
+    } else if (((i + 1) < len) && (text[i] == '{') && (text[i+1] == '\\')) {
+
+      i += 2;  // Move past opening override marker.
+
+      for (;;) {
+
+        if (i >= len) {
+          // Unterminated override block: all safely parseable content has
+          // already been consumed, so stop at end of Dialogue Text.
+          break;
+        }
+
+        if (strncmp (&text[i], "i1", 2) == 0) {
+          italflag = 1;
+          if (fputs ("<i>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+
+        } else if (strncmp (&text[i], "i0", 2) == 0) {
+          italflag = 0;
+          if (fputs ("</i>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+
+        } else if (strncmp (&text[i], "i}", 2) == 0) {
+          italflag = 0;
+          if (fputs ("</i>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+          break;
+
+        } else if (strncmp (&text[i], "b1", 2) == 0) {
+          boldflag = 1;
+          if (fputs ("<b>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+
+        } else if (strncmp (&text[i], "b0", 2) == 0) {
+          boldflag = 0;
+          if (fputs ("</b>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+
+        } else if (strncmp (&text[i], "u1", 2) == 0) {
+          underlineflag = 1;
+          if (fputs ("<u>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+
+        } else if (strncmp (&text[i], "u0", 2) == 0) {
+          underlineflag = 0;
+          if (fputs ("</u>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+
+        } else if (strncmp (&text[i], "s1", 2) == 0) {
+          strikeoutflag = 1;
+          if (fputs ("<s>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+
+        } else if (strncmp (&text[i], "s0", 2) == 0) {
+          strikeoutflag = 0;
+          if (fputs ("</s>", fo) == EOF) return (EXIT_FAILURE);
+          i += 2;
+
+        // Primary font color override.
+        } else if (strncmp (&text[i], "c&H", 3) == 0) {
+
+          // A new color override replaces an earlier color override.
+          if (colorflag && (fputs ("</font>", fo) == EOF)) return (EXIT_FAILURE);
+          colorflag = 1;
+
+          memset (temp, 0, MAXLEN * sizeof (char));
+          i++;  // Move past c to the opening '&' of &H...
+          j = 0;
+          if ((i >= len) || (text[i] != '&')) return (EXIT_FAILURE);
+          temp[j++] = text[i++];
+          while ((i < len) && (text[i] != '&')) {
+            if (j >= (MAXLEN - 2)) return (EXIT_FAILURE);
+            temp[j++] = text[i++];
+          }
+          if (i >= len) return (EXIT_FAILURE);
+          temp[j++] = text[i++];  // Copy terminating '&'.
+          temp[j] = '\0';
+
+          if (parse_color (temp, fo) != EXIT_SUCCESS) return (EXIT_FAILURE);
+
+        // Primary font color off.
+        } else if (strncmp (&text[i], "c}", 2) == 0) {
+          if (colorflag && (fputs ("</font>", fo) == EOF)) return (EXIT_FAILURE);
+          colorflag = 0;
+          i += 2;
+          break;
+
+        // Alignment override. Preserve either \a or \an notation.
+        } else if ((text[i] == 'a') && ((i + 1) < len) &&
+                   ((text[i+1] == 'n') || isdigit ((unsigned char) text[i+1]))) {
+
+          if (fputs ("{\\a", fo) == EOF) return (EXIT_FAILURE);
+          i++;
+
+          while ((i < len) && (text[i] != '}') && (text[i] != '\\')) {
+            if (fputc (text[i], fo) == EOF) return (EXIT_FAILURE);
+            i++;
+          }
+
+          if ((i < len) && (text[i] == '}')) {
+            if (fputc ('}', fo) == EOF) return (EXIT_FAILURE);
+            i++;
+            break;
+          }
+          if ((i < len) && (text[i] == '\\')) {
+            if (fputc ('}', fo) == EOF) return (EXIT_FAILURE);
+            i++;
+            continue;
+          }
+          break;
+
+        // Position is not representable in SubRip; ignore it.
+        } else if (strncmp (&text[i], "pos", 3) == 0) {
+          i += 3;
+          while ((i < len) && (text[i] != ')') && (text[i] != '\\') && (text[i] != '}')) i++;
+          if ((i < len) && (text[i] == ')')) i++;
+
+        // Other color and alpha overrides are not implemented in SubRip.
+        } else if ((strncmp (&text[i], "1c&H", 4) == 0) ||
+                   (strncmp (&text[i], "2c&H", 4) == 0) ||
+                   (strncmp (&text[i], "3c&H", 4) == 0) ||
+                   (strncmp (&text[i], "4c&H", 4) == 0) ||
+                   (strncmp (&text[i], "alpha&H", 7) == 0) ||
+                   (strncmp (&text[i], "1a&H", 4) == 0) ||
+                   (strncmp (&text[i], "2a&H", 4) == 0) ||
+                   (strncmp (&text[i], "3a&H", 4) == 0) ||
+                   (strncmp (&text[i], "4a&H", 4) == 0)) {
+          // Skip the complete &H...& value, not merely the opening ampersand.
+          while ((i < len) && (text[i] != '&') && (text[i] != '\\') && (text[i] != '}')) i++;
+          if ((i < len) && (text[i] == '&')) {
+            i++;
+            while ((i < len) && (text[i] != '&') && (text[i] != '\\') && (text[i] != '}')) i++;
+            if ((i < len) && (text[i] == '&')) i++;
+          }
+
+        } else if (text[i] == '}') {
+          i++;
+          break;
+
+        } else if (text[i] == '\\') {
+          i++;
+          continue;
+
+        // Unknown/unimplemented override. Ignore it up to the next separator
+        // or the end of the block rather than rejecting the whole subtitle.
+        } else {
+          while ((i < len) && (text[i] != '\\') && (text[i] != '}')) i++;
+        }
+      }
+
+    } else if ((text[i] == '{') || (text[i] == '\\')) {
+
+      // A literal brace/backslash that is not a recognized SSA escape or
+      // override must still be consumed; otherwise this loop could stall.
+      if (fputc (text[i], fo) == EOF) return (EXIT_FAILURE);
+      i++;
+
+    } else {
+
+      // Ordinary subtitle text.
+      while ((i < len) && (text[i] != '{') && (text[i] != '\\')) {
+        if (fputc (text[i], fo) == EOF) return (EXIT_FAILURE);
+        i++;
+      }
+    }
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
+  // Repair missing closing override tags at the end of this subtitle.
+  if (strikeoutflag && (fputs ("</s>", fo) == EOF)) return (EXIT_FAILURE);
+  if (underlineflag && (fputs ("</u>", fo) == EOF)) return (EXIT_FAILURE);
+  if (italflag && (fputs ("</i>", fo) == EOF)) return (EXIT_FAILURE);
+  if (boldflag && (fputs ("</b>", fo) == EOF)) return (EXIT_FAILURE);
+  if (colorflag && (fputs ("</font>", fo) == EOF)) return (EXIT_FAILURE);
 
-// Allocate memory for an array of pointers to arrays of chars.
-char **
-allocate_strmemp (int len) {
-    
-  void *tmp;
-    
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmemp().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (char **) malloc (len * sizeof (char *));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char *));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmemp().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of ints.
-int *
-allocate_intmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_intmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (int *) malloc (len * sizeof (int));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (int));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_intmem().\n");
-    exit (EXIT_FAILURE);
-  }
+  return (EXIT_SUCCESS);
 }

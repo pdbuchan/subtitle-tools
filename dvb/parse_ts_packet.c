@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -38,7 +38,7 @@ parse_ts_packet (STATE *state, PAGE **page, PAT *pat, uint8_t *tsdata, size_t ts
     exit (EXIT_FAILURE);
   }
 
-  fprintf(fo, "\nTransport Stream Packet %lu:\n", *packet);
+  fprintf (fo, "\nTransport Stream Packet %zu:\n", *packet);
 
   // Sync Byte (1 byte)
   if (tsdata[offset] != 0x47) {
@@ -97,6 +97,7 @@ parse_ts_packet (STATE *state, PAGE **page, PAT *pat, uint8_t *tsdata, size_t ts
       break;
 
     default:
+      break;
 
   }  // End switch
   offset += 2;
@@ -192,7 +193,7 @@ parse_ts_packet (STATE *state, PAGE **page, PAT *pat, uint8_t *tsdata, size_t ts
       break;
 
   }  // End switch adapt_field_cntrl
-  fprintf (fo, "  Payload length: %lu bytes\n", ts_payloadlen);
+  fprintf (fo, "  Payload length: %zu bytes\n", ts_payloadlen);
 
   // Temporarily update state->ts_index for the benefit of parse_pes_header().
   state->ts_index = offset;
@@ -203,22 +204,29 @@ parse_ts_packet (STATE *state, PAGE **page, PAT *pat, uint8_t *tsdata, size_t ts
     switch (state->pid_type[state->pid]) {
 
       case PID_PSI:
-        build_psi_section (state, pat, tsdata, tslen, ts_payloadlen, section, fo);
+        // Reassembly/parsing errors are fatal for this packet; propagate them
+        // to main rather than continuing with an inconsistent section buffer.
+        if (build_psi_section (state, pat, tsdata, tslen, ts_payloadlen, section, fo) != EXIT_SUCCESS)
+          return (EXIT_FAILURE);
         break;
 
       case PID_PES:
-        build_pes_segment (state, page, tsdata, tslen, ts_payloadlen, segment, pes, fo);
+        // Do the same for PES reassembly, including DVB subtitle parsing.
+        if (build_pes_segment (state, page, tsdata, tslen, ts_payloadlen, segment, pes, fo) != EXIT_SUCCESS)
+          return (EXIT_FAILURE);
         break;
 
       case PID_UNKNOWN:  // Unknown; fall through to default.
 
       default:
-        // Only PSI PIDs are allowed before classification by a PMT.
+        // Before PMT classification is available, only the fixed well-known
+        // PSI PIDs can safely be sent to the PSI section reassembler.
         if (state->pid == 0x0000 ||     // PAT
             state->pid == 0x0001 ||     // CAT
             state->pid == 0x0002 ||     // TSDT
             state->pid == 0x0011) {     // SDT/BAT
-          build_psi_section (state, pat, tsdata, tslen, ts_payloadlen, section, fo);
+          if (build_psi_section (state, pat, tsdata, tslen, ts_payloadlen, section, fo) != EXIT_SUCCESS)
+            return (EXIT_FAILURE);
         }
         // Else: ignore silently
         break;
@@ -229,5 +237,5 @@ parse_ts_packet (STATE *state, PAGE **page, PAT *pat, uint8_t *tsdata, size_t ts
   // Ensure we never get out of step with packet boundaries.
   state->ts_index = start + 188;
 
-  return EXIT_SUCCESS;
+  return (EXIT_SUCCESS);
 }

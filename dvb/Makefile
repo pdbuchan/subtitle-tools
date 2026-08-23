@@ -5,14 +5,14 @@ DEBUG = -Wall -g
 
 all: dvb
 
-dvb: allocate.o assemble_composition.o build_pes_segment.o build_psi_section.o clear_page.o clut_utils.o data_ids.o \
+dvb: allocate.o assemble_composition.o build_pes_segment.o build_psi_section.o clear_page.o clut_utils.o crc32.o data_ids.o \
      default_2clut.o default_4clut.o default_8clut.o disparity_shift_update_sequence.o emit_pixels.o finalize_page_if_needed.o \
      get_8bits.o initialize_clut_family.o main.o parse_adapt_field.o parse_cds.o parse_dds.o parse_dss.o \
      parse_eight_bit_code_string.o parse_end.o parse_four_bit_code_string.o parse_ods.o parse_pat.o parse_pcs.o parse_pes_header.o \
      parse_pes_segment.o parse_pmt.o parse_psi_section.o parse_rcs.o parse_sdt.o parse_ts_packet.o parse_two_bit_code_string.o \
      search_functions.o segment_types.o stream_ids.o stream_types.o time.o write_bmp.o write_utils.o YCbCr2RGB_bt601.o
 
-	$(CC) $(DEBUG) -o dvb allocate.o assemble_composition.o build_pes_segment.o build_psi_section.o clear_page.o clut_utils.o data_ids.o \
+	$(CC) $(DEBUG) -o dvb allocate.o assemble_composition.o build_pes_segment.o build_psi_section.o clear_page.o clut_utils.o crc32.o data_ids.o \
      default_2clut.o default_4clut.o default_8clut.o disparity_shift_update_sequence.o emit_pixels.o finalize_page_if_needed.o \
      get_8bits.o initialize_clut_family.o main.o parse_adapt_field.o parse_cds.o parse_dds.o parse_dss.o \
      parse_eight_bit_code_string.o parse_end.o parse_four_bit_code_string.o parse_ods.o parse_pat.o parse_pcs.o parse_pes_header.o \
@@ -36,6 +36,9 @@ clear_page.o: clear_page.c dvb.h
 
 clut_utils.o: clut_utils.c dvb.h
 	$(CC) $(DEBUG) $(CCFLAGS) -c clut_utils.c
+
+crc32.o: crc32.c dvb.h
+	$(CC) $(DEBUG) $(CCFLAGS) -c crc32.c
 
 data_ids.o: data_ids.c dvb.h
 	$(CC) $(DEBUG) $(CCFLAGS) -c data_ids.c

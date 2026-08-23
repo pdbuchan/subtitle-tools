@@ -16,70 +16,96 @@
 
 #include "sub.h"
 
-// Extract subtitles from .sub file.
 int
-extract_subs (uint8_t *subdata, size_t subdatalen, OPTIONS *options, IDX *idx, PES *pes_info, FILE *fo) {
+extract_subs (uint8_t *subdata, size_t subdatalen, OPTIONS *options,
+              IDX *idx, PES *pes_info, FILE *fo) {
 
   size_t lang, timestamp, spu_buffer_size;
   uint8_t *img_buffer, *spu_buffer;
   SPU_PARMS spu_info;
   SUB sub;
 
-  // Allocate memory for various arrays.
-  spu_buffer_size = (size_t) MAX_SPU_SIZE + 2;  // Add 2 padding bytes to prevent seg-fault in get_16bits().
-  spu_buffer = allocate_u8mem ((int) spu_buffer_size);
-  img_buffer = allocate_u8mem (IMG_BUFFER_SIZE);  // Will contain unpacked RGBA values.
+  img_buffer = NULL;
+  spu_buffer = NULL;
+  memset (&spu_info, 0, sizeof (spu_info));
+  memset (&sub, 0, sizeof (sub));
 
   fprintf (stdout, "\n");
 
-  // Loop through each language of subtitles.
   for (lang = 0; lang < idx->n_id; lang++) {
+    fprintf (stdout, "Processing subtitles for language: %s%zu\n",
+             idx->id[lang], idx->id_index[lang]);
 
-    fprintf (stdout, "Processing subtitles for language: %s%zu\n", idx->id[lang], idx->id_index[lang]);
-
-    // Loop through each timestamp/offset (i.e., subtitle) for current language.
     for (timestamp = 0; timestamp < idx->n_timestamps[lang]; timestamp++) {
+      fprintf (fo, "\nSUBTITLE %zu for Language ID: %zu (%s)\n\n",
+               timestamp, idx->id_index[lang], idx->id[lang]);
 
-      fprintf (fo, "\nSUBTITLE %zu for Language ID: %zu (%s)\n\n", timestamp, idx->id_index[lang], idx->id[lang]);
+      free (spu_buffer);
+      spu_buffer = NULL;
+      spu_buffer_size = 0;
+      memset (&sub, 0, sizeof (sub));
 
-      // Parse all MPEG-2 packets needed to compose one complete Subpicture Unit (SPU).
-      // Store complete SPU in spu_buffer array.
-      parse_packets (options, subdata, subdatalen, spu_buffer, timestamp, idx, lang, pes_info, &sub, fo);
-
-      // Clear SPU parameters.
-      memset (&spu_info, 0, sizeof (SPU_PARMS));
-
-      // Parse Subpicture Unit (SPU).
-      parse_spu (options, spu_buffer, idx, pes_info, &spu_info, &sub, fo);
-
-      // Make bitmaps of subtitles if requested.
-      if (options->makebmp_flag) {
-
-        // Clear image buffer.
-        memset (img_buffer, 0u, IMG_BUFFER_SIZE * sizeof (uint8_t));
-
-        // Unpack RLE-encoded subpicture pixel data (PXD).
-        unpack_pxd (spu_buffer, spu_buffer_size, &spu_info, idx, img_buffer, &sub);
-
-        // Ensure end time is later than start time. This can occur for last subtitle
-        // if Stop Display (STP_DSP) isn't included in last SPU. In this case, add a nominal 5 seconds.
-        if (sub.end.totalms <= sub.start.totalms) {
-          sub.end.totalms = sub.start.totalms + 5000;
-          mstotime (&sub.end);
-        }
-
-        // Create bitmap file.
-        write_bmp (img_buffer, idx, lang, &sub);
+      if (parse_packets (options, subdata, subdatalen, &spu_buffer,
+                         &spu_buffer_size, timestamp, idx, lang,
+                         pes_info, &sub, fo) != EXIT_SUCCESS) {
+        free_spu_parms (&spu_info);
+        free (spu_buffer);
+        free (img_buffer);
+        return (EXIT_FAILURE);
       }
 
-    }  // Next filepos offset (i.e., next subtitle)
-  }  // Next language of subtitles
+      if (parse_spu (spu_buffer, spu_buffer_size, idx, pes_info,
+                     &spu_info, &sub, fo) != EXIT_SUCCESS) {
+        free_spu_parms (&spu_info);
+        free (spu_buffer);
+        free (img_buffer);
+        return (EXIT_FAILURE);
+      }
+
+      if (options->makebmp_flag) {
+        if (unpack_pxd (spu_buffer, spu_buffer_size, &spu_info, idx,
+                        &img_buffer, &sub) != EXIT_SUCCESS) {
+          free_spu_parms (&spu_info);
+          free (spu_buffer);
+          free (img_buffer);
+          return (EXIT_FAILURE);
+        }
+
+        // Last subtitles occasionally omit STP_DSP. Use a nominal five seconds.
+        if (sub.end.totalms <= sub.start.totalms) {
+          if (sub.start.totalms > INT64_MAX - 5000) {
+            fprintf (stderr, "Subtitle fallback end timestamp overflow.\n");
+            free_spu_parms (&spu_info);
+            free (spu_buffer);
+            free (img_buffer);
+            return (EXIT_FAILURE);
+          }
+          sub.end.totalms = sub.start.totalms + 5000;
+          if (mstotime (&sub.end) != EXIT_SUCCESS) {
+            free_spu_parms (&spu_info);
+            free (spu_buffer);
+            free (img_buffer);
+            return (EXIT_FAILURE);
+          }
+        }
+
+        if (write_bmp (img_buffer, idx, lang, &sub) != EXIT_SUCCESS) {
+          free_spu_parms (&spu_info);
+          free (spu_buffer);
+          free (img_buffer);
+          return (EXIT_FAILURE);
+        }
+      }
+
+      free_spu_parms (&spu_info);
+      memset (&spu_info, 0, sizeof (spu_info));
+    }
+  }
 
   fprintf (stdout, "\n");
-
-  // Free allocated memory.
   free (spu_buffer);
   free (img_buffer);
+  free_spu_parms (&spu_info);
 
   return (EXIT_SUCCESS);
 }

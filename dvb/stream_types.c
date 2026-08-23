@@ -21,6 +21,8 @@
 int
 stream_types (STATE *state, uint8_t stream_type, FILE *fo) {
 
+  (void) state;
+
   fprintf (fo, "    Stream Type (1 byte): 0x%02x ", stream_type);
 
   switch (stream_type) {
@@ -146,7 +148,7 @@ stream_types (STATE *state, uint8_t stream_type, FILE *fo) {
       if ((stream_type >= 0x1c) && (stream_type <= 0x7e)) {
         fprintf (fo, "ITU-T Rec. H.222.0 | ISO/IEC 13818-1 Reserved\n");
         break;
-      } else if ((stream_type >= 0x80) && (stream_type <= 0xff)) {
+      } else if (stream_type >= 0x80) {
         fprintf (fo, "User Private\n");
       }
   }  // End switch

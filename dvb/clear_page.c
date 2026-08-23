@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,49 +16,39 @@
 
 #include "dvb.h"
 
+// Clear all data belonging to one completed Display Set while retaining the
+// PAGE structure itself for reuse by a later Display Set having the same
+// page_id.
 void
-clear_page (STATE *state, PAGE *page) {
+clear_page (PAGE *page, size_t p) {
 
-  int temp;
-  size_t i, page_idx;
+  size_t i;
 
-  // Retrieve page index from state->page_id.
-  temp = find_page_index (state, page, state->page_id);
-  if (temp < 0) {
-    fprintf (stderr, "Cannot find page index from state->page_id in clear_page()\n");
-    fprintf (stderr, "page_id: 0x%04x\n", state->page_id);
-    exit (EXIT_FAILURE);
-  } else {
-    page_idx = (size_t) temp;
+  page[p].complete = 0;
+
+  // Each object owns both a CLUT-entry buffer and a coded-pixel mask.
+  for (i = 0; i < page[p].nobjects; i++) {
+    free (page[p].object[i].buffer);
+    free (page[p].object[i].coded);
   }
+  free (page[p].object);
+  page[p].object = NULL;
+  page[p].nobjects = 0;
 
-  // Clear page for next Display Set.
-  page[page_idx].complete = 0;
+  free (page[p].clut);
+  page[p].clut = NULL;
+  page[p].ncluts = 0;
 
-  for (i = 0; i < page[page_idx].nobjects; i++) {
-    free (page[page_idx].object[i].buffer);
-  }
-  page[page_idx].nobjects = 0;
-  free (page[page_idx].object);
-  page[page_idx].object = NULL;
+  free (page[p].region_pos);
+  page[p].region_pos = NULL;
+  page[p].nregion_pos = 0;
 
-  free (page[page_idx].clut);
-  page[page_idx].clut = NULL;
-  page[page_idx].ncluts = 0;
+  free (page[p].region);
+  page[p].region = NULL;
+  page[p].nregions = 0;
 
-  page[page_idx].nregion_pos = 0;
-  free (page[page_idx].region_pos);
-  page[page_idx].region_pos = NULL;
-  page[page_idx].nregions = 0;
-  free (page[page_idx].region);
-  page[page_idx].region = NULL;
-
-  page[page_idx].width = 0;
-  page[page_idx].height = 0;
-
-  memset (page[page_idx].buffer, 0, IMG_BUFFER_SIZE * sizeof (uint8_t));
-
-  // State
-  state->display_width = 0;
-  state->display_height = 0;
+  // Keep the PAGE-owned RGBA buffer in a known empty state between Display
+  // Sets. Its lifetime is the lifetime of the PAGE slot itself.
+  page[p].width = page[p].height = 0;
+  if (page[p].buffer) memset (page[p].buffer, 0, IMG_BUFFER_SIZE);
 }

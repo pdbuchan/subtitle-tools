@@ -16,51 +16,109 @@
 
 #include "sub.h"
 
-// Decode next field of RLE-encoded pixel data.
-int
-decode_rle (uint8_t *spu_buffer, size_t *bitpos, RLE *rle) {
+static int
+get_bits (const uint8_t *buffer, size_t buffer_size, size_t *bitpos,
+          unsigned int nbits, uint32_t *value) {
 
-  uint16_t bits;
+  unsigned int i;
+  uint32_t v;
 
-  // Format of RLE-encoded pixel data (PXD)
-  // Val Range  Bits     Format
-  // 1-3        4        nncc
-  // 4-15       8        00nn nncc
-  // 16-63      12       0000 nnnn nncc
-  // 64-255     16       0000 00nn nnnn nncc *
-  // If at end of a line and bit count is not a multiple of 8, four fill bits of 0 are added.
-  // * Special case: If nn nnnn nn equals 0, then use same pixel value until end of line.
+  if (nbits == 0 || nbits > 32 || *bitpos > buffer_size * 8 ||
+      (size_t) nbits > buffer_size * 8 - *bitpos) {
+    return (EXIT_FAILURE);
+  }
 
-  // Obtain the next 16 bits, store in uint16_t bits.
-  get_16bits (spu_buffer, bitpos, &bits);
+  v = 0;
+  for (i = 0; i < nbits; i++) {
+    size_t pos = *bitpos + i;
+    v = (v << 1) | ((buffer[pos / 8] >> (7 - (pos % 8))) & 1u);
+  }
 
-  rle->to_eol = 0;  // Default to not running the same color of pixel to end of line.
+  *bitpos += nbits;
+  *value = v;
+  return (EXIT_SUCCESS);
+}
 
-  // 0000 00nn nnnn nncc (16 bits)
-  if ((bits >> 10) == 0) {
-    rle->runlength = (size_t) (bits >> 2);
-    rle->color = (uint8_t) (bits & 0x03);  // 3 = 0000 0000 0000 0011
-    if (rle->runlength == 0) rle->to_eol = 1;  // * Special case: same pixel type to end of line
-    (*bitpos) += 16;
+static int
+decode_rle_2bit (const uint8_t *buffer, size_t buffer_size, size_t *bitpos,
+                 RLE *rle) {
 
-  // 0000 nnnn nncc xxxx (12 bits)
-  } else if ((bits >> 12) == 0) {
-    rle->runlength = (size_t) (bits >> 6);
-    rle->color = (uint8_t) ((bits >> 4) & 0x03);
-    (*bitpos) += 12;
+  unsigned int threshold;
+  uint32_t nibble, v;
 
-  // 00nn nncc xxxx xxxx (8 bits)
-  } else if ((bits >> 14) == 0) {
-    rle->runlength = (size_t) ((bits >> 10) & 15);  // 15 = 0000 0000 0000 1111
-    rle->color = (uint8_t) ((bits >> 8) & 0x03);
-    (*bitpos) += 8;
+  v = 0;
+  for (threshold = 1; v < threshold && threshold <= 0x40; threshold <<= 2) {
+    if (get_bits (buffer, buffer_size, bitpos, 4, &nibble) != EXIT_SUCCESS) {
+      return (EXIT_FAILURE);
+    }
+    v = (v << 4) | nibble;
+  }
 
-  // nncc xxxx xxxx xxxx (4 bits)
+  rle->color = (uint8_t) (v & 3u);
+  if (v < 4) {
+    rle->to_eol = 1;
+    rle->runlength = 0;
   } else {
-    rle->runlength = (size_t) (bits >> 14);
-    rle->color = (uint8_t) ((bits >> 12) & 0x03);
-    (*bitpos) += 4;
+    rle->to_eol = 0;
+    rle->runlength = (size_t) (v >> 2);
   }
 
   return (EXIT_SUCCESS);
+}
+
+static int
+decode_rle_8bit (const uint8_t *buffer, size_t buffer_size, size_t *bitpos,
+                 RLE *rle) {
+
+  uint32_t has_run, wide_color, long_run, value;
+
+  if (get_bits (buffer, buffer_size, bitpos, 1, &has_run) != EXIT_SUCCESS ||
+      get_bits (buffer, buffer_size, bitpos, 1, &wide_color) != EXIT_SUCCESS ||
+      get_bits (buffer, buffer_size, bitpos, wide_color ? 8u : 2u, &value) != EXIT_SUCCESS) {
+    return (EXIT_FAILURE);
+  }
+
+  rle->color = (uint8_t) value;
+  rle->to_eol = 0;
+
+  if (!has_run) {
+    rle->runlength = 1;
+    return (EXIT_SUCCESS);
+  }
+
+  if (get_bits (buffer, buffer_size, bitpos, 1, &long_run) != EXIT_SUCCESS) {
+    return (EXIT_FAILURE);
+  }
+
+  if (long_run) {
+    if (get_bits (buffer, buffer_size, bitpos, 7, &value) != EXIT_SUCCESS) {
+      return (EXIT_FAILURE);
+    }
+    if (value == 0) {
+      rle->to_eol = 1;
+      rle->runlength = 0;
+    } else {
+      rle->runlength = (size_t) value + 9;
+    }
+  } else {
+    if (get_bits (buffer, buffer_size, bitpos, 3, &value) != EXIT_SUCCESS) {
+      return (EXIT_FAILURE);
+    }
+    rle->runlength = (size_t) value + 2;
+  }
+
+  return (EXIT_SUCCESS);
+}
+
+int
+decode_rle (const uint8_t *buffer, size_t buffer_size, size_t *bitpos,
+            uint8_t is_8bit, RLE *rle) {
+
+  if (buffer == NULL || bitpos == NULL || rle == NULL) return (EXIT_FAILURE);
+
+  if (is_8bit) {
+    return decode_rle_8bit (buffer, buffer_size, bitpos, rle);
+  }
+
+  return decode_rle_2bit (buffer, buffer_size, bitpos, rle);
 }

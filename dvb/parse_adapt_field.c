@@ -21,6 +21,11 @@
 int
 parse_adapt_field (STATE *state, size_t *index, uint8_t *tsdata, size_t tslen, FILE *fo) {
 
+  // These parameters are retained for a consistent parser interface. Packet
+  // bounds are established by parse_ts_packet() before this function is called.
+  (void) state;
+  (void) tslen;
+
   size_t i, adapt_field_len, adapt_field_ext_len, af_bytes_left, af_ext_bytes_left, transp_priv_data_len;
   uint8_t pcr_flag, opcr_flag, splicing_point_flag, transp_priv_data_flag, adapt_field_ext_flag, ltw_valid_flag, splice_type;
   uint8_t splice_countdown, ltw_flag, piecewise_rate_flag, seamless_splice_flag;

@@ -1,4 +1,4 @@
-/*  Copyright (C) 2024-2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2024-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -38,7 +38,7 @@ double clocktoms (double *, double, double, double);
 char *allocate_strmem (int);
 
 // Set some symbolic constants.
-#define MAXLEN 256  // Maximum number of characters per line
+#define MAX_STRINGLEN 256  // Maximum number of characters per line
 
 int
 main (int argc, char **argv) {
@@ -50,14 +50,14 @@ main (int argc, char **argv) {
   FILE *fo;
 
   // Allocate memory for various arrays.
-  temp = allocate_strmem (MAXLEN);
+  temp = allocate_strmem (MAX_STRINGLEN);
   hh_str = allocate_strmem (3);
   mm_str = allocate_strmem (3);
   ss_str = allocate_strmem (3);
 
   // Ask for feature duration.
   fprintf (stdout, "What is feature duration (hh:mm:ss.sss)? ");
-  memset (temp, 0, MAXLEN * sizeof (char));
+  memset (temp, 0, MAX_STRINGLEN * sizeof (char));
   inputtext (temp);
   sscanf (temp, "%[^:]:%[^:]:%s", hh_str, mm_str, ss_str);
 
@@ -91,7 +91,7 @@ main (int argc, char **argv) {
   clocktoms (&msdur, hh, mm, ss);
 
   fprintf (stdout, "What is desired number of chapters? ");
-  memset (temp, 0, MAXLEN * sizeof (char));
+  memset (temp, 0, MAX_STRINGLEN * sizeof (char));
   inputtext (temp);
   errno = 0;
   nchap = strtod (temp, &endptr);
@@ -168,15 +168,55 @@ main (int argc, char **argv) {
 // Obtain a text string from standard input. It can include spaces.
 int
 inputtext (char *text) {
-  
-  // Request new text from standard input.
-  fgets (text, MAXLEN, stdin);
-  
-  // Remove trailing newline, if there.
-  if ((strnlen(text, MAXLEN) > 0) && (text[strnlen (text, MAXLEN) - 1] == '\n')) {
-    text[strnlen (text, MAXLEN) - 1] = '\0';  // Replace newline with string termination.
+
+  int ch;
+  size_t len;
+
+  if (fgets (text, MAX_STRINGLEN, stdin) == NULL) {
+    fprintf (stderr, "Unable to read text from standard input.\n");
+    exit (EXIT_FAILURE);
   }
-  
+
+  len = strlen (text);
+
+  // Remove trailing newline, and a preceding carriage return if present.
+  if ((len > 0) && (text[len - 1] == '\n')) {
+    text[--len] = '\0';
+    if ((len > 0) && (text[len - 1] == '\r')) {
+      text[--len] = '\0';
+    }
+    return (EXIT_SUCCESS);
+  }
+
+  // If the buffer is full, determine whether the input was exactly
+  // MAX_STRINGLEN - 1 characters or was genuinely too long.
+  if (len == MAX_STRINGLEN - 1) {
+
+    ch = getchar ();
+
+    // Exactly MAX_STRINGLEN - 1 characters followed by newline or EOF.
+    if ((ch == '\n') || (ch == EOF)) {
+      return (EXIT_SUCCESS);
+    }
+
+    // Handle CRLF after an exactly full input line.
+    if (ch == '\r') {
+      ch = getchar ();
+      if ((ch == '\n') || (ch == EOF)) {
+        return (EXIT_SUCCESS);
+      }
+    }
+
+    // Discard the remainder of an overlong input line.
+    while ((ch != '\n') && (ch != EOF)) {
+      ch = getchar ();
+    }
+
+    fprintf (stderr, "Input text is too long; maximum is %d characters.\n",
+             MAX_STRINGLEN - 1);
+    exit (EXIT_FAILURE);
+  }
+
   return (EXIT_SUCCESS);
 }
 

@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,312 +16,170 @@
 
 #include "dvb.h"
 
-// Parse a Service Description Table (SDT)
+// Parse a Service Description Table (SDT).
 // PID = 0x0011
-// table_id: 0x42 SDT for actual DVB transport stream
-// table_id: 0x46 SDT for other DVB transport stream
-// Reference: ETSI EN 300 468 (Section 5.2.3)
+// table_id 0x42 = SDT for the actual DVB transport stream
+// table_id 0x46 = SDT for another DVB transport stream
+// Reference: ETSI EN 300 468, section 5.2.3.
 int
 parse_sdt (STATE *state, SECTION *section, FILE *fo) {
 
-  size_t i, offset, service_start, section_length, desc_end, section_end, d, descriptors_length, descriptor_length, provider_name_length, service_name_length;
-  uint8_t table_id, version_number, current_next_indicator, section_syntax_indicator, section_number, last_section_number, descriptor_tag, eit_schedule_flag, eit_present_following_flag;
-  uint8_t running_status, free_ca_mode, service_type;
-  uint16_t pid, transport_stream_id, original_network_id, service_id;
+  size_t offset, section_length, end, desc_len, desc_end, i;
+  uint16_t pid = state->pid, tsid, onid, service_id;
+  uint8_t *buf, table_id, version, current, section_number, last_section;
 
-  pid = state->pid;
-  offset = 0;
-  service_start = offset;
-
-  // Table ID (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
+  if (!section[pid].buffer || section[pid].length < 3) {
+    return (EXIT_FAILURE);
   }
-  table_id = section[pid].buffer[offset];
-  offset++;
+  buf = section[pid].buffer;
+
+  // Table ID (1 byte).
+  table_id = buf[0];
+
+  // BAT shares the PID but is not parsed here.
   if (table_id == 0x4a) {
     fprintf (fo, "Bouquet Association Table (BAT)\n");
     return (EXIT_SUCCESS);
-  } else if (table_id == 0x42) {
-    fprintf(fo, "Service Description Table (SDT)\n");
   }
-  fprintf (fo, "  Table ID (1 byte): 0x%02x\n", table_id);
-
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
+  if (table_id != 0x42 && table_id != 0x46) {
+    return (EXIT_FAILURE);
   }
 
-  // Section Syntax Indicator (1 bit)
-  section_syntax_indicator = (section[pid].buffer[offset] >> 7) & 1;
-  fprintf (fo, "  Section Syntax Indicator (1 bit): %u\n", section_syntax_indicator);
+  // Section Syntax Indicator, reserved bits, and Section Length occupy bytes
+  // 1 and 2. parse_psi_section() has already validated the CRC.
+  section_length = (size_t) (((buf[1] & 0x0f) << 8) | buf[2]);
+  if (section_length < 12 || 3 + section_length != section[pid].length) {
+    fprintf (stderr, "Invalid SDT section length.\n");
+    return (EXIT_FAILURE);
+  }
+  end = section[pid].length - 4;  // CRC begins here; already verified by caller.
+  offset = 3;
+  if (!bytes_available (offset, 8, end)) {
+    return (EXIT_FAILURE);
+  }
 
-  // Reserved for future use (1 bit)
-
-  // Reserved (2 bits)
-
-  // Section Length (12 bits)
-  section_length = (section[pid].buffer[offset] & 0x0f) << 8 |
-                 section[pid].buffer[offset + 1];
+  // Transport Stream ID (2 bytes).
+  tsid = (uint16_t) (((uint16_t) buf[offset] << 8) | buf[offset + 1]);
   offset += 2;
-  fprintf (fo, "  Section Length (12 bits): %zu bytes (%zu bytes including table ID, SSI, section len)\n", section_length, section_length + 3);
 
-  // Minimum SDT size: header + CRC
-  if (section_length < 9) {
-    return EXIT_SUCCESS;
-  }
+  // Version Number (5 bits) and Current/Next Indicator (1 bit).
+  version = (buf[offset] >> 1) & 0x1f;
+  current = buf[offset++] & 1;
 
-  // Transport Stream ID (2 bytes)
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
-  }
-  transport_stream_id = (section[pid].buffer[offset]) << 8 |
-                 section[pid].buffer[offset + 1];
+  // Section Number and Last Section Number (1 byte each).
+  section_number = buf[offset++];
+  last_section = buf[offset++];
+
+  // Original Network ID (2 bytes), followed by reserved_future_use (1 byte).
+  onid = (uint16_t) (((uint16_t) buf[offset] << 8) | buf[offset + 1]);
   offset += 2;
-  fprintf (fo, "  Transport Stream ID (2 bytes): 0x%04x\n", transport_stream_id);
-
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Reserved (2 bits)
-
-  // Version Number (5 bits)
-  version_number = (section[pid].buffer[offset] >> 1) & 0x1f;  // 0x1f = 11111
-  fprintf (fo, "  Version Number (5 bits): 0x%02x\n", version_number);
-
-  // Normally you don't bother processing anything more if version hasn't changed.
-  // We will continue anyway for the sake of fully documenting the .ts file.
-
-  // Current Next Indicator (1 bit)
-  current_next_indicator = section[pid].buffer[offset] & 1;
-  offset++;
-  fprintf (fo, "  Current Next Indicator (1 bit): %d\n", current_next_indicator);
-
-  // Section Number (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
-  }
-  section_number = section[pid].buffer[offset];
-  offset++;
-  fprintf (fo, "  Section Number (1 byte): 0x%02x\n", section_number);
-
-  // Last Section Number (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
-  }
-  last_section_number = section[pid].buffer[offset];
-  offset++;
-  fprintf (fo, "  Last Section Number (1 byte): 0x%02x\n", last_section_number);
-
-  // Original Network ID (2 bytes)
-  if ((offset + 1) >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
-  }
-  original_network_id = (section[pid].buffer[offset] << 8) |
-                         section[pid].buffer[offset + 1];
-  offset += 2;
-  fprintf (fo, "  Original Network ID (2 bytes): 0x%04x\n", original_network_id);
-
-  // Reserved for future use (1 byte)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
-  }
   offset++;
 
-  // Service loop
-  // Runs until we reach the CRC (last 4 bytes of the section)
-  while (offset < (3 + section_length - 4)) {
+  fprintf (fo, "Service Description Table (SDT)\n");
+  fprintf (fo, "  Table ID: 0x%02x\n", table_id);
+  fprintf (fo, "  Section Length: %zu bytes\n", section_length);
+  fprintf (fo, "  Transport Stream ID: 0x%04x\n", tsid);
+  fprintf (fo, "  Version Number: 0x%02x\n", version);
+  fprintf (fo, "  Current Next Indicator: %u\n", current);
+  fprintf (fo, "  Section Number: 0x%02x\n", section_number);
+  fprintf (fo, "  Last Section Number: 0x%02x\n", last_section);
+  fprintf (fo, "  Original Network ID: 0x%04x\n", onid);
 
-    // Service ID (2 bytes)
-    if ((offset + 1) >= MAX_BUFFERLEN) {
-      fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-      exit (EXIT_FAILURE);
-    }
-    service_id = (section[pid].buffer[offset] << 8) |
-                  section[pid].buffer[offset + 1];
-    offset += 2;
-    fprintf (fo, "  Service ID (2 bytes): 0x%04x\n", service_id);
+  // Service loop. Entries continue until the four-byte CRC at end.
+  while (offset < end) {
+    uint8_t eit_schedule, eit_pf, running, free_ca;
 
-    if (offset >= MAX_BUFFERLEN) {
-      fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-      exit (EXIT_FAILURE);
-    }
-
-    // Reserved for future use (6 bits)
-
-    // EIT Schedule Flag (1 bit)
-    eit_schedule_flag = (section[pid].buffer[offset] >> 1) & 1;
-
-    // EIT Present/Following Flag (1 bit)
-    eit_present_following_flag = section[pid].buffer[offset] & 1;
-    offset++;
-    fprintf (fo, "    EIT Schedule Flag (1 bit): %u\n", eit_schedule_flag);
-    fprintf (fo, "    EIT Present/Following Flag (1 bit): %u\n", eit_present_following_flag);
-
-    if ((offset + 1) >= MAX_BUFFERLEN) {
-      fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-      exit (EXIT_FAILURE);
+    if (!bytes_available (offset, 5, end)) {
+      fprintf (stderr, "Truncated SDT service entry.\n");
+      return (EXIT_FAILURE);
     }
 
-    // Running Status (3 bits)
-    running_status = (section[pid].buffer[offset] >> 5) & 0x07;
-    switch (running_status) {
-
-      case 0:
-        fprintf (fo, "    Running Status (3 bits): %u Undefined\n", running_status);
-        break;
-
-      case 1:
-        fprintf (fo, "    Running Status (3 bits): %u Not running\n", running_status);
-        break;
-
-      case 2:
-        fprintf (fo, "    Running Status (3 bits): %u Starts in a few seconds (e.g., for video recording)\n", running_status);
-        break;
-
-      case 3:
-        fprintf (fo, "    Running Status (3 bits): %u Pausing\n", running_status);
-        break;
-
-      case 4:
-        fprintf (fo, "    Running Status (3 bits): %u Running\n", running_status);
-        break;
-
-      case 5:
-        fprintf (fo, "    Running Status (3 bits): %u Service off-air\n", running_status);
-        break;
-
-      default:
-        fprintf (fo, "    Running Status (3 bits): %u Reserved for future use\n", running_status);
-        break;
-    }
-
-    // Free CA Mode (1 bit)
-    free_ca_mode = (section[pid].buffer[offset] >> 4) & 1;
-    if (!free_ca_mode) {
-      fprintf (fo, "    Free CA Mode (1 bit): %u All component streams of the service are not scrambled\n", free_ca_mode);
-    } else {
-      fprintf (fo, "    Free CA Mode (1 bit): %u Access to one or more streams may be controlled by a conditional access system\n", free_ca_mode);
-    }
-
-    // Descriptors Length (12 bits)
-    descriptors_length = (size_t)
-        (((section[pid].buffer[offset] & 0x0f) << 8) |
-         section[pid].buffer[offset + 1]);
+    // Service ID (2 bytes).
+    service_id = (uint16_t) (((uint16_t) buf[offset] << 8) | buf[offset + 1]);
     offset += 2;
 
-    fprintf (fo, "    Descriptors Length (12 bits): %zu bytes\n", descriptors_length);
+    // Reserved future use (6 bits), EIT Schedule Flag (1 bit), and EIT
+    // Present/Following Flag (1 bit).
+    eit_schedule = (buf[offset] >> 1) & 1;
+    eit_pf = buf[offset++] & 1;
 
-    // Descriptor Loop
-    section_end = 3 + section_length - 4;
-    desc_end = offset + descriptors_length;
-    if (desc_end > section_end) {
-      desc_end = section_end;
+    // Running Status (3 bits), Free CA Mode (1 bit), and high four bits of
+    // Descriptors Loop Length.
+    running = (buf[offset] >> 5) & 7;
+    free_ca = (buf[offset] >> 4) & 1;
+    desc_len = (size_t) (((buf[offset] & 0x0f) << 8) | buf[offset + 1]);
+    offset += 2;
+
+    if (!bytes_available (offset, desc_len, end)) {
+      fprintf (stderr, "SDT descriptor loop exceeds section length.\n");
+      return (EXIT_FAILURE);
     }
-    while ((offset + 2) < desc_end) {
+    desc_end = offset + desc_len;
 
-      if ((offset + 1) >= MAX_BUFFERLEN) {
-        fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-        exit (EXIT_FAILURE);
+    fprintf (fo, "  Service ID: 0x%04x\n", service_id);
+    fprintf (fo, "    EIT Schedule Flag: %u\n", eit_schedule);
+    fprintf (fo, "    EIT Present/Following Flag: %u\n", eit_pf);
+    fprintf (fo, "    Running Status: %u\n", running);
+    fprintf (fo, "    Free CA Mode: %u\n", free_ca);
+    fprintf (fo, "    Descriptors Length: %zu bytes\n", desc_len);
+
+    // Descriptor loop for this service.
+    while (offset < desc_end) {
+      uint8_t tag, dlen;
+      size_t payload_start, d;
+
+      if (!bytes_available (offset, 2, desc_end)) {
+        return (EXIT_FAILURE);
       }
-      descriptor_tag = section[pid].buffer[offset];
-      descriptor_length = (size_t) section[pid].buffer[offset + 1];
-      if (descriptor_length == 0) break;
-      if ((offset + 2 + descriptor_length) > desc_end) break;
+      tag = buf[offset++];
+      dlen = buf[offset++];
+      if (!bytes_available (offset, dlen, desc_end)) {
+        return (EXIT_FAILURE);
+      }
+      payload_start = offset;
 
-      offset += 2;
-
-      fprintf (fo, "      Descriptor Tag: 0x%02x\n", descriptor_tag);
-      fprintf (fo, "      Descriptor Length: %zu\n", descriptor_length);
-
-      // Descriptor data (skipped, but dumped as hex)
+      // Descriptor Tag (1 byte), Descriptor Length (1 byte), followed by the
+      // descriptor payload. Always dump the raw payload even when the specific
+      // descriptor is not decoded below.
+      fprintf (fo, "      Descriptor Tag: 0x%02x\n", tag);
+      fprintf (fo, "      Descriptor Length: %u\n", dlen);
       fprintf (fo, "      Descriptor Data: ");
-      if ((offset + descriptor_length - 1) >= MAX_BUFFERLEN) {
-        fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-        exit (EXIT_FAILURE);
-      }
-      for (i = 0; i < descriptor_length; i++) {
-        fprintf (fo, "%02x", section[pid].buffer[offset + i]);
+      for (i = 0; i < dlen; i++) {
+        fprintf (fo, "%02x", buf[offset + i]);
       }
       fprintf (fo, "\n");
 
-      if ((descriptor_tag == 0x48) && (descriptor_length >= 3)) {
-
-        // Descriptor payload start
-        d = offset;
-
-        // Service Type (1 byte)
-        if (d >= MAX_BUFFERLEN) {
-          fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-          exit (EXIT_FAILURE);
+      // Service Descriptor (tag 0x48): Service Type, Provider Name Length and
+      // string, then Service Name Length and string.
+      if (tag == 0x48 && dlen >= 3) {
+        size_t provider_len, service_len;
+        d = payload_start;
+        fprintf (fo, "        Service Type: 0x%02x\n", buf[d++]);
+        provider_len = buf[d++];
+        if (provider_len > payload_start + dlen - d) {
+          return (EXIT_FAILURE);
         }
-        service_type = section[pid].buffer[d++];
-
-        // Provider Name Length (1 byte)
-        if (d >= MAX_BUFFERLEN) {
-          fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-          exit (EXIT_FAILURE);
-        }
-        provider_name_length = (size_t) section[pid].buffer[d++];
-
-        fprintf (fo, "        Service Type: 0x%02x\n", service_type);
-
-        fprintf (fo, "        Provider Name Length: %zu\n", provider_name_length);
         fprintf (fo, "        Provider Name: ");
-        for (i = 0; i < provider_name_length && d < (offset + descriptor_length); i++) {
-          if (d >= MAX_BUFFERLEN) {
-            fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-            exit (EXIT_FAILURE);
-          }
-          fputc (section[pid].buffer[d++], fo);
-        }
+        for (i = 0; i < provider_len; i++) fputc (buf[d++], fo);
         fprintf (fo, "\n");
-
-        if (d < (offset + descriptor_length)) {
-          service_name_length = (size_t) section[pid].buffer[d];
-          d++;
-          fprintf (fo, "        Service Name Length: %zu\n", service_name_length);
-
-          fprintf (fo, "        Service Name: ");
-          for (i = 0; ((i < service_name_length) && (d < (offset + descriptor_length))); i++) {
-            if (d >= MAX_BUFFERLEN) {
-              fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-              exit (EXIT_FAILURE);
-            }
-            fputc (section[pid].buffer[d], fo);
-            d++;
+        if (d < payload_start + dlen) {
+          service_len = buf[d++];
+          if (service_len > payload_start + dlen - d) {
+            return (EXIT_FAILURE);
           }
+          fprintf (fo, "        Service Name: ");
+          for (i = 0; i < service_len; i++) fputc (buf[d++], fo);
           fprintf (fo, "\n");
         }
       }
 
-      offset += descriptor_length;
-    }
-
-    // Prevent infinite loop on malformed data.
-    if (offset <= service_start) {
-      break;
+      offset = payload_start + dlen;
     }
   }
 
-  // CRC (4 bytes)
-  if (offset >= MAX_BUFFERLEN) {
-    fprintf (stderr, "Unexpectedly reached end of section in parse_sdt().\n");
-    exit (EXIT_FAILURE);
-  }
-  fprintf (fo, "  CRC (4 bytes): ");
-  for (i = 0; i < 4; i++) {
-    fprintf (fo, "%02x", section[pid].buffer[offset + i]);
-  }
-  fprintf (fo, "\n");
+  // CRC (4 bytes). Already checked by parse_psi_section(), but include it in
+  // the human-readable report.
+  fprintf (fo, "  CRC (4 bytes): %02x%02x%02x%02x\n", buf[end], buf[end + 1], buf[end + 2], buf[end + 3]);
 
   return (EXIT_SUCCESS);
 }

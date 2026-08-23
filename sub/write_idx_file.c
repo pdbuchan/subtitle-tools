@@ -16,85 +16,102 @@
 
 #include "sub.h"
 
-// Create a revised .idx file with offset applied or resynchronized timestamps.
-// Applies offsets/resyncronization to all timestamps for all languages.
+// Create a revised .idx file with the same timestamp transformation used for
+// the MPEG PES timestamps in out.sub.
 int
-write_idx_file (const char*idx_filename, OPTIONS *options) {
+write_idx_file (const char *idx_filename, OPTIONS *options) {
 
-  int i;
-  char *line, *timestamp;
-  double ratio;
+  char line[MAX_STRINGLEN];
+  char timestamp[13];
   TIME time;
+  int64_t adjusted_ms;
   FILE *fi, *fo;
 
-  // Allocate memory for various arrays.
-  line = allocate_strmem (MAX_STRINGLEN);
-  timestamp = allocate_strmem (MAX_STRINGLEN);
-
-  // Open existing .idx file.
   fi = fopen (idx_filename, "r");
   if (fi == NULL) {
-    fprintf (stderr, "\nUnable to open input .idx file %s.\n", idx_filename);
-    exit (EXIT_FAILURE);
+    fprintf (stderr, "Unable to open input .idx file %s.\n", idx_filename);
+    return EXIT_FAILURE;
   }
 
-  // Open output file for revised .idx file.
-  fo = fopen ("out.idx", "r");
+  fo = fopen ("out.idx", "rb");
   if (fo != NULL) {
+    fclose (fo);
+    fclose (fi);
     fprintf (stderr, "Output file out.idx already exists.\n");
-    exit (EXIT_FAILURE);
+    return EXIT_FAILURE;
   }
+
   fo = fopen ("out.idx", "w");
   if (fo == NULL) {
+    fclose (fi);
     fprintf (stderr, "Can't open output file out.idx.\n");
-    exit (EXIT_FAILURE);
+    return EXIT_FAILURE;
   }
 
-  // Loop through all lines of existing .idx file.
   while (readline (fi, line, MAX_STRINGLEN) != -1) {
-
-    // Found a timestamp offset line.
     if (strncmp (line, "timestamp:", 10) == 0) {
-      for (i = 11; i < 23; i++) {
-        timestamp[i - 11] = line[i];
-      }
-      parse_timestamp (timestamp, &time);  // Parse timestamp string into TIME struct elements.
+      const char *stamp_start = line + 10;
+      size_t prefix_len;
 
-      // Apply offset to timestamp, if requested.
-      if (options->offset_flag) {
-        time.totalms += options->offset.totalms;
-        mstotime (&time);  // Update hh, mm, ss, ms based on totalms.
-        fprintf (fo, "timestamp: %02d:%02d:%02d,%03d", time.h, time.m, time.s, time.ms);
-        fprintf (fo, "%s", line + 23);  // Copy rest of existing line.
-
-      // Synchronize timestamp, if requested.
-      } else if (options->sync_flag) {
-
-        ratio = (((double) options->newlastms - (double) options->newfirstms) / ((double) options->oldlastms - (double) options->oldfirstms));
-
-        // Scale timestamp.
-        time.totalms = (uint64_t) (((double) options->newfirstms) + ((((double) time.totalms) - ((double) options->oldfirstms)) * ratio));
-        mstotime (&time);  // Update hh, mm, ss, ms based on totalms.
-        fprintf (fo, "timestamp: %02d:%02d:%02d,%03d", time.h, time.m, time.s, time.ms);
-        fprintf (fo, "%s", line + 23);  // Copy rest of existing line.
+      while (*stamp_start == ' ' || *stamp_start == '\t') stamp_start++;
+      if (strlen (stamp_start) < 12) {
+        fprintf (stderr, "Malformed timestamp line in IDX file: %s", line);
+        fclose (fi);
+        fclose (fo);
+        return EXIT_FAILURE;
       }
 
-    // Copy entire existing line.
+      memcpy (timestamp, stamp_start, 12);
+      timestamp[12] = '\0';
+      if (parse_timestamp (timestamp, &time) != EXIT_SUCCESS ||
+          transform_timestamp_ms (options, time.totalms, &adjusted_ms) != EXIT_SUCCESS) {
+        fprintf (stderr, "Unable to transform IDX timestamp: %s", line);
+        fclose (fi);
+        fclose (fo);
+        return EXIT_FAILURE;
+      }
+
+      time.totalms = adjusted_ms;
+      if (mstotime (&time) != EXIT_SUCCESS) {
+        fclose (fi);
+        fclose (fo);
+        return EXIT_FAILURE;
+      }
+
+      // IDX's conventional timestamp field has two decimal hour digits.
+      if (time.h > 99) {
+        fprintf (stderr, "Adjusted IDX timestamp exceeds 99 hours.\n");
+        fclose (fi);
+        fclose (fo);
+        return EXIT_FAILURE;
+      }
+
+      prefix_len = (size_t) (stamp_start - line);
+      if (fwrite (line, 1, prefix_len, fo) != prefix_len ||
+          fprintf (fo, "%02d:%02d:%02d,%03d%s",
+                   time.h, time.m, time.s, time.ms, stamp_start + 12) < 0) {
+        fprintf (stderr, "I/O error while writing out.idx.\n");
+        fclose (fi);
+        fclose (fo);
+        return EXIT_FAILURE;
+      }
     } else {
-      fprintf (fo, "%s", line);
-    }  // End if timestamp keyword found
+      fputs (line, fo);
+    }
+  }
 
-    memset (line, 0, MAX_STRINGLEN * sizeof (char));
+  if (ferror (fi) || ferror (fo)) {
+    fprintf (stderr, "I/O error while creating out.idx.\n");
+    fclose (fi);
+    fclose (fo);
+    return EXIT_FAILURE;
+  }
 
-  }  // Next line of existing .idx file.
-
-  // Close input and output files.
   fclose (fi);
-  fclose (fo);
+  if (fclose (fo) != 0) {
+    fprintf (stderr, "Unable to finalize out.idx.\n");
+    return EXIT_FAILURE;
+  }
 
-  // Free allocated memory.
-  free (line);
-  free (timestamp);
-
-  return (EXIT_SUCCESS);
+  return EXIT_SUCCESS;
 }

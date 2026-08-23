@@ -28,10 +28,18 @@
 
 #define MAX_STRINGLEN 512  // Maximum length of a character string
 #define MAX_PIDS 8192  // PID is 13 bits; 8191 = binary 1 1111 1111 1111
-#define MAX_BUFFERLEN 65540  // Max required size of a PSI section or PES DVB subtitle segment buffer (for one object image)
+// Largest reassembly buffer used for a PSI section or a PES packet containing
+// DVB subtitle data. Bounds are checked against the number of bytes actually
+// received; the allocation size itself is never used as proof that input exists.
+#define MAX_BUFFERLEN 65541
 #define MAX_PROGRAMS 65536  // Maximum number of Programs
 #define MAX_STREAMS 65536  // Maximum number of Elementary Streams for a given Program
-#define IMG_BUFFER_SIZE 3840 * 2160 * 4  // PAL DVD is 720x576, NTSC DVD is 720x480, but dvb.c will work for .ts files from HD (1920x1080) and UHD (3840x2160) BDs too; x 4 for RGBA
+// Maximum page-composition dimensions supported by the bitmap renderer.
+// The composition buffer contains one RGBA quadruplet for each pixel.
+#define MAX_IMAGE_WIDTH 3840
+#define MAX_IMAGE_HEIGHT 2160
+#define IMG_PIXEL_COUNT ((size_t) MAX_IMAGE_WIDTH * (size_t) MAX_IMAGE_HEIGHT)
+#define IMG_BUFFER_SIZE (IMG_PIXEL_COUNT * 4)
 #define PES_LEN_UNBOUNDED (-1)
 #define MAX_REGIONS 256  // Maximum number of regions within a page
 #define MAX_OBJECTS 65536  // Maximum number of objects
@@ -89,7 +97,7 @@ typedef struct {
   uint8_t makebmp_flag;
   size_t npages;
   uint8_t have_pat;  // Flag to indicate we have processed PAT with latest version number
-  PID_TYPE pid_type[MAX_PIDS];  // PID_UNKNOWN, PID_PSU, or PID_PES
+  PID_TYPE pid_type[MAX_PIDS];  // PID_UNKNOWN, PID_PSI, or PID_PES
   uint8_t pusi;  // Current Payload Unit Start Indicator
   uint16_t pid;  // Current PID
   uint16_t page_id;  // Current Page ID; we assume only 1 page_id per Display Set
@@ -125,8 +133,8 @@ typedef struct {
 
 // PES segment buffer
 typedef struct {
-  size_t length;  // Length of a given PES segment buffer
-  uint8_t *buffer;  // Add 1 padding byte to prevent overflow in get_8bits() function.
+  size_t length;  // Number of valid bytes currently stored in a PES segment buffer.
+  uint8_t *buffer;  // Reassembly storage; parsers must never read beyond length.
 } SEGMENT;
 
 // One pixel's color and Alpha
@@ -157,7 +165,15 @@ typedef struct {
   uint8_t version;
   size_t width;
   size_t height;
-  uint8_t *buffer;  // Image buffer for object decoded from RLE data to object w, object h, array of CLUT entry values
+  // Object data is decoded in two passes. The first pass determines the final
+  // width and height; the second pass stores CLUT entry values with that fixed
+  // width as the row stride.
+  uint8_t *buffer;
+
+  // DVB permits individual object scan lines to have a ragged right edge. A
+  // value of 1 means the corresponding pixel was explicitly coded in the ODS;
+  // 0 means it was not coded and the underlying composition must be left unchanged.
+  uint8_t *coded;
   uint8_t non_modifying_colour_flag;
 } OBJECT;
 
@@ -230,8 +246,8 @@ typedef struct {
 // Function prototypes
 int parse_ts_packet (STATE *, PAGE **, PAT *, uint8_t *, size_t, size_t *, PES *, SECTION *, SEGMENT *, FILE *);
 int parse_adapt_field (STATE *, size_t *, uint8_t *, size_t, FILE *);
-int build_psi_section (STATE *, PAT *, uint8_t *, size_t, int, SECTION *, FILE *);
-int build_pes_segment (STATE *, PAGE **, uint8_t *, size_t, int, SEGMENT *, PES *, FILE *);
+int build_psi_section (STATE *, PAT *, uint8_t *, size_t, size_t, SECTION *, FILE *);
+int build_pes_segment (STATE *, PAGE **, uint8_t *, size_t, size_t, SEGMENT *, PES *, FILE *);
 int parse_psi_section (STATE *, PAT *, SECTION *, FILE *);
 int parse_pes_header (STATE *, PAGE **, size_t *, SEGMENT *, PES *, FILE *);
 int parse_pes_segment (STATE *, PAGE **, SEGMENT *, PES *, FILE *);
@@ -245,17 +261,18 @@ int parse_cds (STATE *, PAGE **, size_t *, SEGMENT *, FILE *);
 int parse_ods (STATE *, PAGE **, size_t *, SEGMENT *, FILE *);
 int parse_dds (STATE *, PAGE **, size_t *, SEGMENT *, FILE *);
 int parse_dss (STATE *, PAGE **, size_t *, SEGMENT *, FILE *);
-int disparity_shift_update_sequence (STATE *, size_t *, size_t *, SEGMENT *, FILE *);
+int disparity_shift_update_sequence (STATE *, size_t *, size_t *, size_t, SEGMENT *, FILE *);
 int parse_end (STATE *, PAGE **, size_t *, SEGMENT *, FILE *);
-size_t parse_two_bit_code_string (STATE *, SEGMENT *, size_t *, RLE *);
-size_t parse_four_bit_code_string (STATE *, SEGMENT *, size_t *, RLE *);
-size_t parse_eight_bit_code_string (STATE *, SEGMENT *, size_t *, RLE *);
+int get_bits (STATE *, SEGMENT *, size_t *, size_t, unsigned int, uint8_t *);
+int parse_two_bit_code_string (STATE *, SEGMENT *, size_t *, size_t, RLE *);
+int parse_four_bit_code_string (STATE *, SEGMENT *, size_t *, size_t, RLE *);
+int parse_eight_bit_code_string (STATE *, SEGMENT *, size_t *, size_t, RLE *);
 int find_page_index (STATE *, PAGE *, uint16_t);
-int find_region_index (STATE *, PAGE *, uint8_t);
-int find_object_index (STATE *, PAGE *, uint16_t);
-int find_clut_index (STATE *, PAGE *, uint8_t);
+int find_region_index (PAGE *, size_t, uint8_t);
+int find_object_index (PAGE *, size_t, uint16_t);
+int find_clut_index (PAGE *, size_t, uint8_t);
 int find_program_by_pmt_pid (PAT *, uint16_t);
-int initialize_clut_family (STATE *, PAGE *, size_t);
+int initialize_clut_family (PAGE *, size_t, size_t);
 RGBA default_2clut (uint8_t);
 RGBA default_4clut (uint8_t);
 RGBA default_8clut (uint8_t);
@@ -267,23 +284,34 @@ uint8_t reduce_4to2 (uint8_t);
 uint8_t map_2to4 (uint8_t);
 uint8_t map_2to8 (uint8_t);
 uint8_t map_4to8 (uint8_t);
-int get_8bits (STATE *, SEGMENT *, size_t *, uint8_t *);
-int emit_pixels (STATE *, PAGE **, RLE *, size_t *, size_t);
-int YCbCr2RGB_bt601 (uint8_t, int, int, int, int *);
-int stream_types (STATE *, uint8_t, FILE *);  // PES Stream Type Assignments - ISO/IEC 13818-1 (Table 2-34)
-int stream_ids (STATE *, FILE *);  // PES stream ID assignments - ISO/IEC 13818-1 (Table 2-22)
-int data_ids (STATE *, uint8_t, FILE *);  // Data Identifiers for DVB Transport Streams - ETSI EN 301 192 (Table 2)
+int emit_pixels (PAGE **, size_t, size_t, RLE *, size_t *, size_t);
+int YCbCr2RGB_bt601 (int, int, int, int *);
+int stream_types (STATE *, uint8_t, FILE *);
+int stream_ids (STATE *, FILE *);
+int data_ids (STATE *, uint8_t, FILE *);
 int segment_types (STATE *, uint8_t, FILE *fo);
 int mstotime (TIME *);
-int assemble_composition (STATE *, PAGE **);
-int write_bmp (STATE *, PAGE *, uint8_t *);
+int assemble_composition (STATE *, PAGE **, size_t);
+int write_bmp (STATE *, PAGE *, size_t, uint8_t *);
 void write_u16_le (FILE *, uint16_t);
 void write_u32_le (FILE *, uint32_t);
 void write_s32_le (FILE *, int32_t);
-void clear_page (STATE *, PAGE *);
-uint8_t *allocate_u8mem (int);
-char *allocate_strmem (int);
-size_t *allocate_sizemem (int);
-PROGRAM *allocate_progmem (int);
-SECTION *allocate_sectionmem (int);
-SEGMENT *allocate_segmentmem (int);
+void clear_page (PAGE *, size_t);
+// Calculate the MPEG-2 CRC-32 used by PSI sections. A complete valid section,
+// including its transmitted CRC bytes, has a CRC remainder of zero.
+uint32_t mpeg2_crc32 (const uint8_t *, size_t);
+uint8_t *allocate_u8mem (size_t);
+char *allocate_strmem (size_t);
+size_t *allocate_sizemem (size_t);
+PROGRAM *allocate_progmem (size_t);
+SECTION *allocate_sectionmem (size_t);
+SEGMENT *allocate_segmentmem (size_t);
+
+// Test whether count bytes beginning at offset are contained in a buffer whose
+// valid data length is length. Writing the test this way also avoids unsigned
+// overflow in an expression such as offset + count <= length.
+static inline int
+bytes_available (size_t offset, size_t count, size_t length) {
+
+  return ((offset <= length) && (count <= (length - offset)));
+}

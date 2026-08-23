@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -22,419 +22,193 @@ int
 parse_rcs (STATE *state, PAGE **page, size_t *offset, SEGMENT *segment, FILE *fo) {
 
   int temp;
-  size_t i, consumed, segment_length, nobjects, old_size, page_idx, region_idx;
-  uint8_t sync_byte, segment_type, region_id, region_version_number, region_fill_flag, region_level_of_compatibility, region_depth, clut_id;
-  uint8_t region_8_bit_pixel_code, region_4_bit_pixel_code, region_2_bit_pixel_code, object_type, object_provider_flag;
-  uint8_t foreground_pixel_code, background_pixel_code;
-  uint16_t pid, page_id, region_width, region_height, object_id, object_horizontal_position, object_vertical_position;
-  OBJECT_POS object_pos[MAX_OBJECTS] = {0};
+  size_t end, page_idx, region_idx, nobjects;
+  uint8_t *buf, region_id, object_type;
+  uint16_t pid, page_id, object_id;
+  REGION *region;
   void *tmp;
 
   pid = state->pid;
-
+  buf = segment[pid].buffer;
   fprintf (fo, "\n  Region Composition Segment (RCS)\n");
 
-  // Sync Byte (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
+  // Segment header: Sync Byte, Segment Type, Page ID, Segment Length.
+  if (!bytes_available (*offset, 6, segment[pid].length)) {
+    fprintf (stderr, "Truncated RCS header.\n");
+    return (EXIT_FAILURE);
   }
-  sync_byte = segment[pid].buffer[*offset];
-  if (sync_byte != 0x0f) {
-    fprintf (stderr, "Sync byte not found in parse_rcs().\n");
-    fprintf (stderr, "Found: 0x%02x\n", sync_byte);
-    exit (EXIT_FAILURE);
+  if (buf[*offset] != 0x0f || buf[*offset + 1] != 0x11) {
+    fprintf (stderr, "Invalid RCS sync byte or segment type.\n");
+    return (EXIT_FAILURE);
   }
-  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", sync_byte);
-  (*offset)++;
 
-  // Segment Type (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  segment_type = segment[pid].buffer[*offset];
-  if (segment_type != 0x11) {
-    fprintf (stderr, "Wrong Segment Type found in parse_rcs().\n");
-    fprintf (stderr, "Found: 0x%02x\n", segment_type);
-    exit (EXIT_FAILURE);
-  }
-  segment_types (state, segment_type, fo);
-  (*offset)++;
+  // Sync Byte (1 byte) and Segment Type (1 byte).
+  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", buf[*offset]);
+  segment_types (state, buf[*offset + 1], fo);
 
-  // Page ID (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  page_id = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
+  // Page ID (2 bytes).
+  page_id = (uint16_t) (((uint16_t) buf[*offset + 2] << 8) | buf[*offset + 3]);
   state->page_id = page_id;
   fprintf (fo, "    Page ID (2 bytes): 0x%04x\n", page_id);
-  (*offset) += 2;
 
-  // Obtain Page index from page_id.
+  // Segment Length (2 bytes).
+  end = (size_t) (((uint16_t) buf[*offset + 4] << 8) | buf[*offset + 5]);
+  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", end);
+  *offset += 6;
+  if (!bytes_available (*offset, end, segment[pid].length)) {
+    fprintf (stderr, "RCS segment_length exceeds available PES data.\n");
+    return (EXIT_FAILURE);
+  }
+  end += *offset;
+
+  // Obtain Page array index from page_id.
   temp = find_page_index (state, *page, page_id);
   if (temp < 0) {
-    fprintf (stderr, "Cannot find index for page_id: 0x%04x in parse_rcs().\n", page_id);
-    exit (EXIT_FAILURE);
-  } else {
-    page_idx = (size_t) temp;
+    fprintf (stderr, "Cannot find page_id 0x%04x in parse_rcs().\n", page_id);
+    return (EXIT_FAILURE);
+  }
+  page_idx = (size_t) temp;
+
+  // Fixed part of the RCS body is ten bytes.
+  if (!bytes_available (*offset, 10, end)) {
+    fprintf (stderr, "Truncated fixed portion of RCS.\n");
+    return (EXIT_FAILURE);
   }
 
-  // Segment Length (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  segment_length = (size_t) ((segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1]);
-  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", segment_length);
-  (*offset) += 2;
-  consumed = 0;
-
-  // Region ID (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  region_id = segment[pid].buffer[*offset];
-  fprintf (fo, "    Region ID (1 byte): 0x%02x\n", region_id);
+  // Region ID (1 byte).
+  region_id = buf[(*offset)++];
   state->region_id = region_id;
-  (*offset)++;
-  consumed++;
+  fprintf (fo, "    Region ID (1 byte): 0x%02x\n", region_id);
 
-  // Search the regions of page[page_id] to retrieve state->region_id's index.
-  // If we can't find it, allocate memory for this region.
-  temp = find_region_index (state, *page, region_id);
+  // Region IDs are identifiers, not array indexes. Find the compact array
+  // index, adding a new region if this is its first definition.
+  temp = find_region_index (*page, page_idx, region_id);
   if (temp < 0) {
-    old_size = (*page)[page_idx].nregions;
-    region_idx = (*page)[page_idx].nregions;  // Note it's a 0-based array.
-    tmp = (REGION *) realloc ((*page)[page_idx].region, (old_size + 1) * sizeof (REGION));
-    if (tmp != NULL) {
-      (*page)[page_idx].region = tmp;
-    } else {
-      fprintf (stderr, "Cannot allocate memory for region[%zu] in parse_rcs().\n", region_idx);
-      fprintf (stderr, "region_id: 0x%04x\n", region_id);
-      exit (EXIT_FAILURE);
+    if ((*page)[page_idx].nregions >= MAX_REGIONS) {
+      fprintf (stderr, "Too many regions in page 0x%04x.\n", page_id);
+      return (EXIT_FAILURE);
     }
-    memset (&((*page)[page_idx].region)[old_size], 0, sizeof (REGION));  // Clear only new elements.
-    (*page)[page_idx].region[region_idx].page_id = page_id;
-    (*page)[page_idx].region[region_idx].region_id = region_id;
-    (*page)[page_idx].region[region_idx].version = 0;
-    (*page)[page_idx].region[region_idx].nobjects = 0;
+    region_idx = (*page)[page_idx].nregions;
+    tmp = realloc ((*page)[page_idx].region,
+                   (region_idx + 1) * sizeof (*(*page)[page_idx].region));
+    if (!tmp) {
+      fprintf (stderr, "Cannot allocate region %zu.\n", region_idx);
+      return (EXIT_FAILURE);
+    }
+    (*page)[page_idx].region = tmp;
     (*page)[page_idx].nregions++;
-
-  // Region already has memory allocated for it. Clear it for new data.
-  } else {
+  }
+  else {
     region_idx = (size_t) temp;
-    memset (&(*page)[page_idx].region[region_idx], 0, sizeof (REGION));
-    (*page)[page_idx].region[region_idx].page_id = page_id;
-    (*page)[page_idx].region[region_idx].region_id = region_id;
   }
 
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
+  // An RCS replaces the complete definition of this region version, so clear
+  // the REGION structure before populating it with the new data.
+  region = &(*page)[page_idx].region[region_idx];
+  memset (region, 0, sizeof (*region));
+  region->page_id = page_id;
+  region->region_id = region_id;
 
-  // Region Version Number (4 bits)
-  region_version_number = (segment[pid].buffer[*offset] >> 4) & 0x0f;  // 0x0f = 1111
-  (*page)[page_idx].region[region_idx].version = region_version_number;
-  fprintf (fo, "    Region Version Number (4 bits): 0x%01x\n", region_version_number);
-
-  // Region Fill Flag (1 bit)
-  region_fill_flag = (segment[pid].buffer[*offset] >> 3) & 1;
-  (*page)[page_idx].region[region_idx].fill_flag = region_fill_flag;
-  fprintf (fo, "    Region Fill Flag (1 bit): %u\n", region_fill_flag);
-
-  // Reserved (3 bits)
-
+  // Region Version Number (4 bits), Region Fill Flag (1 bit), Reserved (3 bits).
+  region->version = (buf[*offset] >> 4) & 0x0f;
+  region->fill_flag = (buf[*offset] >> 3) & 1;
+  fprintf (fo, "    Region Version Number (4 bits): 0x%01x\n", region->version);
+  fprintf (fo, "    Region Fill Flag (1 bit): %u\n", region->fill_flag);
   (*offset)++;
-  consumed++;
 
-  // Region Width (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  region_width = (segment[pid].buffer[*offset] << 8) |
-                  segment[pid].buffer[(*offset) + 1];
-  (*page)[page_idx].region[region_idx].width = region_width;
-  fprintf (fo, "    Region Width (2 bytes): %u px\n", region_width);
-  (*offset) += 2;
-  consumed += 2;
+  // Region Width and Height (2 bytes each).
+  region->width = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+  *offset += 2;
+  region->height = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+  *offset += 2;
+  fprintf (fo, "    Region Width (2 bytes): %u px\n", region->width);
+  fprintf (fo, "    Region Height (2 bytes): %u px\n", region->height);
 
-  // Region Height (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  region_height = (segment[pid].buffer[*offset] << 8) |
-                  segment[pid].buffer[(*offset) + 1];
-  (*page)[page_idx].region[region_idx].height = region_height;
-  fprintf (fo, "    Region Height (2 bytes): %u px\n", region_height);
-  (*offset) += 2;
-  consumed += 2;
-
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Region Level of Compatibility (3 bits)
-  region_level_of_compatibility = (segment[pid].buffer[*offset] >> 5) & 0x07;  // 0x07 = 111
-  (*page)[page_idx].region[region_idx].region_level_of_compatibility = region_level_of_compatibility;
-  switch (region_level_of_compatibility) {
-
-    case 0x00:
-      fprintf (fo, "    Region Level of Compatibility (3 bits): 0x%02x Reserved\n", region_level_of_compatibility);
-      break;
-
-    case 0x01:
-      fprintf (fo, "    Region Level of Compatibility (3 bits): 0x%02x 2-bit/entry CLUT required\n", region_level_of_compatibility);
-      break;
-
-    case 0x02:
-      fprintf (fo, "    Region Level of Compatibility (3 bits): 0x%02x 4-bit/entry CLUT required\n", region_level_of_compatibility);
-      break;
-
-    case 0x03:
-      fprintf (fo, "    Region Level of Compatibility (3 bits): 0x%02x 8-bit/entry CLUT required\n", region_level_of_compatibility);
-      break;
-
-    default:
-      if ((region_level_of_compatibility >= 0x04) && (region_level_of_compatibility <= 0x07)) {
-        fprintf (fo, "    Region Level of Compatibility (3 bits): 0x%02x Reserved\n", region_level_of_compatibility);
-        break;
-      } else {
-        fprintf (stderr, "Unknown Region Level of Compatibility (3 bits) 0x%02x in parse_rcs().\n", region_level_of_compatibility);
-        exit (EXIT_FAILURE);
-      }
-
-  }  // End switch
-
-  // Region Depth (3 bits)
-  region_depth = (segment[pid].buffer[*offset] >> 2) & 0x07;  // 0x07 = 111
-  (*page)[page_idx].region[region_idx].depth = region_depth;
-  switch (region_depth) {
-
-    case 0x00:
-      fprintf (fo, "    Region Depth (3 bits): 0x%02x Reserved\n", region_depth);
-      break;
-
-    case 0x01:
-      fprintf (fo, "    Region Depth (3 bits): 0x%02x 2-bit pixel depth\n", region_depth);
-      break;
-
-    case 0x02:
-      fprintf (fo, "    Region Depth (3 bits): 0x%02x 4-bit pixel depth\n", region_depth);
-      break;
-
-    case 0x03:
-      fprintf (fo, "    Region Depth (3 bits): 0x%02x 8-bit pixel depth\n", region_depth);
-      break;
-
-    default:
-      if ((region_depth >= 0x04) && (region_depth <= 0x07)) {
-        fprintf (fo, "    Region Depth (3 bits): 0x%02x Reserved\n", region_depth);
-        break;
-      } else {
-        fprintf (stderr, "Unknown Region Depth (3 bits) 0x%02x in parse_rcs().\n", region_depth);
-        exit (EXIT_FAILURE);
-      }
-
-  }  // End switch
-
-  // Reserved (2 bits)
-
+  // Region Level of Compatibility (3 bits), Region Depth (3 bits),
+  // Reserved (2 bits).
+  region->region_level_of_compatibility = (buf[*offset] >> 5) & 7;
+  region->depth = (buf[*offset] >> 2) & 7;
+  fprintf (fo, "    Region Level of Compatibility (3 bits): 0x%02x\n", region->region_level_of_compatibility);
+  fprintf (fo, "    Region Depth (3 bits): 0x%02x\n", region->depth);
   (*offset)++;
-  consumed++;
 
-  // CLUT ID (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  clut_id = segment[pid].buffer[*offset];
-  (*page)[page_idx].region[region_idx].clut_id = clut_id;
-  fprintf (fo, "    CLUT ID (1 byte): 0x%02x\n", clut_id);
+  // CLUT ID (1 byte).
+  region->clut_id = buf[(*offset)++];
+  fprintf (fo, "    CLUT ID (1 byte): 0x%02x\n", region->clut_id);
+
+  // Store these through region_idx, never region_id. A region_id may be any
+  // 8-bit value and therefore cannot safely index the allocated region array.
+
+  // Region 8-bit Pixel Code (1 byte).
+  region->pixel_code_8bit = buf[(*offset)++];
+
+  // Region 4-bit Pixel Code (4 bits), Region 2-bit Pixel Code (2 bits),
+  // Reserved (2 bits). These are the background fill codes selected according
+  // to region depth when region_fill_flag is set.
+  region->pixel_code_4bit = (buf[*offset] >> 4) & 0x0f;
+  region->pixel_code_2bit = (buf[*offset] >> 2) & 0x03;
+  fprintf (fo, "    Region 8-bit Pixel Code (8 bits): 0x%02x\n", region->pixel_code_8bit);
+  fprintf (fo, "    Region 4-bit Pixel Code (4 bits): 0x%01x\n", region->pixel_code_4bit);
+  fprintf (fo, "    Region 2-bit Pixel Code (2 bits): 0x%01x\n", region->pixel_code_2bit);
   (*offset)++;
-  consumed++;
 
-  // Region 8-bit Pixel Code (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  region_8_bit_pixel_code = segment[pid].buffer[*offset];
-  (*page)[page_idx].region[region_id].pixel_code_8bit = region_8_bit_pixel_code;
-  fprintf (fo, "    Region 8-bit Pixel Code (8 bits): 0x%02x\n", region_8_bit_pixel_code);
-  (*offset)++;
-  consumed++;
-
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Region 4-bit Pixel Code (4 bits)
-  region_4_bit_pixel_code = (segment[pid].buffer[*offset] >> 4) & 0x0f;  // 0x0f = 1111
-  (*page)[page_idx].region[region_id].pixel_code_4bit = region_4_bit_pixel_code;
-  fprintf (fo, "    Region 4-bit Pixel Code (4 bits): 0x%01x\n", region_4_bit_pixel_code);
-
-  // Region 2-bit Pixel Code (2 bits)
-  region_2_bit_pixel_code = (segment[pid].buffer[*offset] >> 2) & 0x03;  // 0x03 = 11
-  (*page)[page_idx].region[region_id].pixel_code_2bit = region_2_bit_pixel_code;
-  fprintf (fo, "    Region 2-bit Pixel Code (2 bits): 0x%01x\n", region_2_bit_pixel_code);
-
-  // Reserved (2 bits)
-
-  (*offset)++;
-  consumed++;
-
-  // Object Loop
+  // Object Loop. REGION contains a fixed-capacity object_pos[] array, so reject
+  // a malformed segment which would exceed MAX_OBJECTS.
   nobjects = 0;
-  while ((consumed < segment_length) && ((*offset) < segment[pid].length)) {
+  while (*offset < end) {
+    OBJECT_POS *pos;
 
-    // Object ID (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-      exit (EXIT_FAILURE);
+    if (nobjects >= MAX_OBJECTS) {
+      fprintf (stderr, "Too many objects in RCS.\n");
+      return (EXIT_FAILURE);
     }
-    object_id = (segment[pid].buffer[*offset] << 8) |
-                 segment[pid].buffer[(*offset) + 1];
-    object_pos[nobjects].object_id = object_id;
+    if (!bytes_available (*offset, 6, end)) {
+      fprintf (stderr, "Truncated object entry in RCS.\n");
+      return (EXIT_FAILURE);
+    }
+
+    pos = &region->object_pos[nobjects];
+    memset (pos, 0, sizeof (*pos));
+
+    // Object ID (2 bytes).
+    object_id = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+    pos->object_id = object_id;
+    *offset += 2;
+
+    // Object Type (2 bits), Object Provider Flag (2 bits), and high four bits
+    // of the 12-bit Object Horizontal Position.
+    object_type = (buf[*offset] >> 6) & 3;
+    pos->object_type = object_type;
+    pos->horizontal_position = (uint16_t) (((buf[*offset] & 0x0f) << 8) | buf[*offset + 1]);
+    *offset += 2;
+
+    // Reserved (4 bits) and Object Vertical Position (12 bits).
+    pos->vertical_position = (uint16_t) (((buf[*offset] & 0x0f) << 8) | buf[*offset + 1]);
+    *offset += 2;
+
     fprintf (fo, "    Object ID (2 bytes): 0x%04x\n", object_id);
-    (*offset) += 2;
-    consumed += 2;
+    fprintf (fo, "      Object Type (2 bits): 0x%01x\n", object_type);
+    fprintf (fo, "      Object Horizontal Position (12 bits): %u px\n", pos->horizontal_position);
+    fprintf (fo, "      Object Vertical Position (12 bits): %u px\n", pos->vertical_position);
 
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-      exit (EXIT_FAILURE);
-    }
-
-    // Object Type (2 bits)
-    object_type = (segment[pid].buffer[*offset] >> 6) & 0x03;  // 0x03 = 11
-    object_pos[nobjects].object_type = object_type;
-    switch (object_type) {
-
-      case 0x00:
-        fprintf (fo, "      Object Type (2 bits): 0x%01x Basic object, bitmap\n", object_type);
-        break;
-
-      case 0x01:
-        fprintf (fo, "      Object Type (2 bits): 0x%01x Basic object, character\n", object_type);
-        break;
-
-      case 0x02:
-        fprintf (fo, "      Object Type (2 bits): 0x%01x Composite object, string of characters\n", object_type);
-        break;
-
-      case 0x03:
-        fprintf (fo, "      Object Type (2 bits): 0x%01x Reserved\n", object_type);
-        break;
-
-      default:
-        fprintf (stderr, "Unknown Object Type (2 bits) 0x%01x in parse_rcs().\n", object_type);
-        exit (EXIT_FAILURE);
-
-    }  // End switch object_type
-
-
-    // Object Provider Flag (2 bits)
-    object_provider_flag = (segment[pid].buffer[*offset] >> 4) & 0x03;  // 0x03 = 11
-    switch (object_provider_flag) {
-
-      case 0x00:
-        fprintf (fo, "      Object Provider Flag (2 bits): 0x%01x Provided in the subtitling stream\n", object_provider_flag);
-        break;
-
-      case 0x01:
-        fprintf (fo, "      Object Provider Flag (2 bits): 0x%01x Provided by a ROM in the Integrated Receiver Decoder (IRD)\n", object_provider_flag);
-        break;
-
-      case 0x02:
-        fprintf (fo, "      Object Provider Flag (2 bits): 0x%01x Reserved\n", object_provider_flag);
-        break;
-
-      case 0x03:
-        fprintf (fo, "      Object Provider Flag (2 bits): 0x%01x Reserved\n", object_provider_flag);
-        break;
-
-      default:
-        fprintf (stdout, "Unknown Object Provider Flag (2 bits) 0x%01x in parse_rcs().\n", object_provider_flag);
-        exit (EXIT_FAILURE);
-
-    }  // End switch object_provider_flag
-
-    // Object Horizontal Position Within Region (12 bits)
-    object_horizontal_position = ((segment[pid].buffer[*offset] & 0x0f) << 8) |
-                                   segment[pid].buffer[(*offset) + 1];
-    object_pos[nobjects].horizontal_position = object_horizontal_position;
-    fprintf (fo, "      Object Horizontal Position (12 bits): %u px from left of region 0x%02x\n", object_horizontal_position, region_id);
-    (*offset) += 2;
-    consumed += 2;
-
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-      exit (EXIT_FAILURE);
-    }
-
-    // Reserved (4 bits)
-
-    // Object Vertical Position Within Region (12 bits)
-    object_vertical_position = ((segment[pid].buffer[*offset] & 0x0f) << 8) |
-                                   segment[pid].buffer[(*offset) + 1];
-    object_pos[nobjects].vertical_position = object_vertical_position;
-    fprintf (fo, "      Object Vertical Position (12 bits): %u px from top of region 0x%02x\n", object_vertical_position, region_id);
-    (*offset) += 2;
-    consumed += 2;
-
-    // Foreground and Background Pixel Codes (for Basic Character Objects, or Composite Character String Objects)
-    if ((object_type == 0x01) || (object_type == 0x02)) {
-
-      // Foreground Pixel Code (1 byte)
-      // Specifies the entry of the 8-bit CLUT used for foreground color. For 4 or 16-entry CLUTs, use reduction schemes (ETSI EN 300 743).
-      if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-        fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-        exit (EXIT_FAILURE);
+    // Basic Character Objects and Composite Character String Objects include
+    // 8-bit foreground and background pixel codes after the position data.
+    // Reduction to 4-bit or 2-bit CLUT depth is performed during composition.
+    if (object_type == 1 || object_type == 2) {
+      if (!bytes_available (*offset, 2, end)) {
+        fprintf (stderr, "Truncated foreground/background codes in RCS.\n");
+        return (EXIT_FAILURE);
       }
-      foreground_pixel_code = segment[pid].buffer[*offset];
-      object_pos[nobjects].foreground_color = foreground_pixel_code;
-      fprintf (fo, "      Foreground Pixel Code (1 byte): 0x%02x (entry selected for foreground character(s) in 8-bit CLUT)\n", foreground_pixel_code);
-      (*offset)++;
-      consumed++;
-
-      // Background Pixel Code (1 byte)
-      // Specifies the entry of the 8-bit CLUT used for background color. For 4 or 16-entry CLUTs, use reduction schemes (ETSI EN 300 743).
-      if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-        fprintf (stderr, "Unexpectedly reached end of segment in parse_rcs().\n");
-        exit (EXIT_FAILURE);
-      }
-      background_pixel_code = segment[pid].buffer[*offset];
-      object_pos[nobjects].background_color = background_pixel_code;
-      fprintf (fo, "      Background Pixel Code (1 byte): 0x%02x (entry selected for foreground character(s) in 8-bit CLUT)\n", background_pixel_code);
-      (*offset)++;
-      consumed++;
+      pos->foreground_color = buf[(*offset)++];
+      pos->background_color = buf[(*offset)++];
+      fprintf (fo, "      Foreground Pixel Code (1 byte): 0x%02x\n", pos->foreground_color);
+      fprintf (fo, "      Background Pixel Code (1 byte): 0x%02x\n", pos->background_color);
     }
-
-    // Increment count of objects for this region.
     nobjects++;
-
-  }  // End while
-
-  // Populate list of object positions.
-  // Note that REGION struct has element OBJECT_POS object_pos[MAX_OBJECTS];
-  (*page)[page_idx].region[region_idx].nobjects = nobjects;
-  for (i = 0; i < nobjects; i++) {
-    (*page)[page_idx].region[region_idx].object_pos[i].object_id = object_pos[i].object_id;
-    (*page)[page_idx].region[region_idx].object_pos[i].object_type = object_pos[i].object_type;
-    (*page)[page_idx].region[region_idx].object_pos[i].horizontal_position = object_pos[i].horizontal_position;
-    (*page)[page_idx].region[region_idx].object_pos[i].vertical_position = object_pos[i].vertical_position;
-    (*page)[page_idx].region[region_idx].object_pos[i].foreground_color = object_pos[i].foreground_color;
-    (*page)[page_idx].region[region_idx].object_pos[i].background_color = object_pos[i].background_color;
   }
+
+  // Save the number of object-position entries actually present in this RCS.
+  region->nobjects = nobjects;
 
   return (EXIT_SUCCESS);
 }

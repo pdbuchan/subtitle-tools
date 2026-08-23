@@ -16,335 +16,262 @@
 
 #include "sub.h"
 
-// Parse .idx file.
-// N.B. The "custom colors" keyword, if present, is ignored because it is not in the DVD standard. Reported here for interest.
-//      The "time offset" and "delay" keywords, if present, are not implemented. Reported here for interest.
-//      The "alpha" keyword, if present, is not applied.
-//      The "smooth" keyword, if present, is not applied.
-//      Many other keywords are also ignored.
+static const char *
+find_nocase (const char *haystack, const char *needle) {
+
+  size_t i, j, haylen, needlelen;
+
+  if (haystack == NULL || needle == NULL) return NULL;
+  haylen = strlen (haystack);
+  needlelen = strlen (needle);
+  if (needlelen == 0) return haystack;
+  if (needlelen > haylen) return NULL;
+
+  for (i = 0; i <= haylen - needlelen; i++) {
+    for (j = 0; j < needlelen; j++) {
+      if (tolower ((unsigned char) haystack[i + j]) !=
+          tolower ((unsigned char) needle[j])) break;
+    }
+    if (j == needlelen) return haystack + i;
+  }
+
+  return NULL;
+}
+
+static const char *
+skip_space (const char *p) {
+  while (*p == ' ' || *p == '\t') p++;
+  return p;
+}
+
+static void
+print_value (FILE *fo, const char *label, const char *line, size_t prefix_len) {
+
+  size_t len;
+  const char *p;
+
+  p = skip_space (line + prefix_len);
+  len = strcspn (p, "\r\n");
+  fprintf (fo, "  %s%.*s\n", label, (int) len, p);
+}
+
+static int
+parse_size_t_decimal (const char *text, size_t *value) {
+
+  unsigned long long v;
+  char *end;
+
+  errno = 0;
+  text = skip_space (text);
+  if (*text == '\0') return EXIT_FAILURE;
+
+  v = strtoull (text, &end, 10);
+  if (errno == ERANGE || end == text || v > SIZE_MAX) return EXIT_FAILURE;
+  end = (char *) skip_space (end);
+  if (*end != '\0' && *end != '\r' && *end != '\n' && *end != ',') return EXIT_FAILURE;
+
+  *value = (size_t) v;
+  return EXIT_SUCCESS;
+}
+
+static int
+parse_hex_offset (const char *text, size_t *value) {
+
+  unsigned long long v;
+  char *end;
+
+  errno = 0;
+  text = skip_space (text);
+  if (*text == '\0') return EXIT_FAILURE;
+
+  v = strtoull (text, &end, 16);
+  if (errno == ERANGE || end == text || v > SIZE_MAX) return EXIT_FAILURE;
+  end = (char *) skip_space (end);
+  if (*end != '\0' && *end != '\r' && *end != '\n') return EXIT_FAILURE;
+
+  *value = (size_t) v;
+  return EXIT_SUCCESS;
+}
+
+static int
+parse_language_line (IDX *idx, const char *line, size_t id, FILE *fo) {
+
+  const char *p, *q, *indexp;
+  size_t len;
+
+  if (id >= idx->n_id) {
+    fprintf (stderr, "More language IDs were found while parsing than during the initial IDX scan.\n");
+    return EXIT_FAILURE;
+  }
+
+  p = skip_space (line + 3);
+  q = strchr (p, ',');
+  if (q == NULL) {
+    fprintf (stderr, "Malformed IDX language line: %s", line);
+    return EXIT_FAILURE;
+  }
+
+  while (q > p && (q[-1] == ' ' || q[-1] == '\t')) q--;
+  len = (size_t) (q - p);
+  if (len == 0 || len >= MAX_STRINGLEN) {
+    fprintf (stderr, "Invalid or overlong IDX language identifier.\n");
+    return EXIT_FAILURE;
+  }
+  memcpy (idx->id[id], p, len);
+  idx->id[id][len] = '\0';
+
+  indexp = find_nocase (strchr (p, ','), "index:");
+  if (indexp == NULL || parse_size_t_decimal (indexp + 6, &idx->id_index[id]) != EXIT_SUCCESS) {
+    fprintf (stderr, "Missing or invalid language index in IDX line: %s", line);
+    return EXIT_FAILURE;
+  }
+
+  fprintf (fo, "  Language: %s, Index: %zu\n", idx->id[id], idx->id_index[id]);
+  return EXIT_SUCCESS;
+}
+
+static int
+parse_palette (IDX *idx, const char *line, FILE *fo) {
+
+  char tmp[MAX_STRINGLEN];
+  char *token;
+  unsigned int r, g, b;
+  int consumed;
+  size_t i, len;
+
+  len = strlen (line + 8);
+  if (len >= sizeof (tmp)) {
+    fprintf (stderr, "IDX palette line is too long.\n");
+    return EXIT_FAILURE;
+  }
+  memcpy (tmp, line + 8, len + 1);
+
+  idx->n_palette = 0;
+  token = strtok (tmp, ", \t\r\n");
+  while (token != NULL) {
+    if (idx->n_palette >= MAX_PALETTE) {
+      fprintf (stderr, "IDX palette contains more than %d entries.\n", MAX_PALETTE);
+      return EXIT_FAILURE;
+    }
+
+    consumed = 0;
+    if (strlen (token) != 6 ||
+        sscanf (token, "%2x%2x%2x%n", &r, &g, &b, &consumed) != 3 ||
+        consumed != 6 || r > 255 || g > 255 || b > 255) {
+      fprintf (stderr, "Invalid RGB palette entry in IDX file: %s\n", token);
+      return EXIT_FAILURE;
+    }
+
+    idx->palette[idx->n_palette++] = (RGB){(uint8_t) r, (uint8_t) g, (uint8_t) b};
+    token = strtok (NULL, ", \t\r\n");
+  }
+
+  if (idx->n_palette == 0) {
+    fprintf (stderr, "IDX palette line contains no colors.\n");
+    return EXIT_FAILURE;
+  }
+
+  fprintf (fo, "  Palette: ");
+  for (i = 0; i < idx->n_palette; i++) {
+    fprintf (fo, "%02x%02x%02x%s", idx->palette[i].r, idx->palette[i].g,
+             idx->palette[i].b, i + 1 == idx->n_palette ? "" : " ");
+  }
+  fprintf (fo, "\n");
+  return EXIT_SUCCESS;
+}
+
+// Parse .idx file.  VobSub presentation-only keywords that do not affect the
+// packet/subpicture decoder are reported but deliberately not applied.
 int
 parse_idx (IDX *idx, char **idxdata, size_t n_idxlines, FILE *fo) {
 
-  size_t i, id, line, lang;
-  uint64_t offset;
-  int offset_format, align, r, g, b;
-  char *p, *token, tmp[MAX_STRINGLEN];
+  size_t line, id, lang, off, expected_ids;
+  const char *p;
 
-  // Scan through lines of .idx file and process all keywords except timestamp.
+  expected_ids = idx->n_id;
   id = 0;
+
+  // First pass: validate/report general properties and language declarations.
   for (line = 0; line < n_idxlines; line++) {
-
-    // Palette
     if (strncmp (idxdata[line], "palette:", 8) == 0) {
-      idx->n_palette = 0;
-      memset (tmp, 0, MAX_STRINGLEN * sizeof (char));
-      strncpy (tmp, idxdata[line], sizeof (tmp));
-      tmp[sizeof (tmp) - 1] = '\0';
-      token = strtok (tmp + 8, ", \n");
-      while (token && (idx->n_palette < MAX_PALETTE)) {
-        sscanf (token, "%02x%02x%02x", &r, &g, &b);
-        idx->palette[idx->n_palette] = (RGB){r, g, b};
-        idx->n_palette++;
-        token = strtok (NULL, ", \n");
-      }
+      if (parse_palette (idx, idxdata[line], fo) != EXIT_SUCCESS) return EXIT_FAILURE;
 
-      // Report palette colors.
-      fprintf (fo, "  Palette: ");
-      for (i = 0; i < idx->n_palette; i++) {
-        fprintf (fo, "%02x%02x%02x ", idx->palette[i].r, idx->palette[i].g, idx->palette[i].b);
-      }
-      fprintf (fo, "\n");
-
-    // Default language index
     } else if (strncmp (idxdata[line], "langidx:", 8) == 0) {
-      sscanf (idxdata[line] + 9, "%zu", &idx->langidx);
+      if (parse_size_t_decimal (idxdata[line] + 8, &idx->langidx) != EXIT_SUCCESS) {
+        fprintf (stderr, "Invalid langidx in IDX file: %s", idxdata[line]);
+        return EXIT_FAILURE;
+      }
       fprintf (fo, "  Default language index: %zu\n", idx->langidx);
 
-    // Language ID(s)
     } else if (strncmp (idxdata[line], "id:", 3) == 0) {
-      p = strcasestr (idxdata[line], "index:");
-      sscanf (p + 7, "%zu", &idx->id_index[id]);
-      memset (tmp, 0, MAX_STRINGLEN * sizeof (char));
-      strncpy (tmp, idxdata[line], sizeof (tmp));
-      tmp[sizeof (tmp) - 1] = '\0';
-      token = strtok (tmp + 4, ", \n");
-      sprintf (idx->id[id], "%s", token);
-      fprintf (fo, "  Language: %s, Index: %zu\n", idx->id[id], idx->id_index[id]);
+      if (parse_language_line (idx, idxdata[line], id, fo) != EXIT_SUCCESS) return EXIT_FAILURE;
       id++;
 
-    // Forced / Non-forced subtitles
     } else if (strncmp (idxdata[line], "forced subs:", 12) == 0) {
-      fprintf (fo, "  Forced subtitles: ");
-      i = 13;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n");
-
-    // Smoothing filter for very blocky images (e.g., anti-aliasing)
+      print_value (fo, "Forced subtitles: ", idxdata[line], 12);
     } else if (strncmp (idxdata[line], "smooth:", 7) == 0) {
-      fprintf (fo, "  Smoothing: ");
-      i = 8;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n");
-
-    // Frame size; Typically 720x576 px for PAL DVD, 720x480 px for NTSC DVD, 1920x1080 px for BD, 3840x2160 px for UHD BD
+      print_value (fo, "Smoothing: ", idxdata[line], 7);
     } else if (strncmp (idxdata[line], "size:", 5) == 0) {
-      fprintf (fo, "  Original frame size (px): ");
-      i = 6;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n");
-
-    // Origin
+      print_value (fo, "Original frame size (px): ", idxdata[line], 5);
     } else if (strncmp (idxdata[line], "org:", 4) == 0) {
-      fprintf (fo, "  Origin (px) (relative to upper-left corner; can be overloaded by alignment): ");
-      i = 5;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n");
-
-    // Image scaling
+      print_value (fo, "Origin (px): ", idxdata[line], 4);
     } else if (strncmp (idxdata[line], "scale:", 6) == 0) {
-      fprintf (fo, "  Image scaling (hor, ver); Origin is at upper-left corner or at alignment coord: ");
-      i = 7;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n"); 
-
-    // Fade in/out times
+      print_value (fo, "Image scaling (hor, ver): ", idxdata[line], 6);
     } else if (strncmp (idxdata[line], "fadein/out:", 11) == 0) {
-      fprintf (fo, "  Fade-in, Fade-out times (ms): ");
-      i = 12;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n");
-
-    // Alpha blending
+      print_value (fo, "Fade-in, Fade-out times (ms): ", idxdata[line], 11);
     } else if (strncmp (idxdata[line], "alpha:", 6) == 0) {
-      fprintf (fo, "  Alpha: ");
-      i = 7;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n");
-
-    // Alignment relative to origin
-    // Numerical index format:
-    //   0 = bottom-center,    1 = bottom-left,
-    //   2 = bottom-right,     3 = middle-center,
-    //   4 = middle-left,      5 = middle-right,
-    //   6 = top-center,       7 = top-left,
-    //   8 = top-right
-    // Text format:
-    //   ON|OFF at LEFT|CENTER|RIGHT BOTTOM|MIDDLE|TOP
-    //   e.g., align: OFF at LEFT TOP
+      print_value (fo, "Alpha: ", idxdata[line], 6);
     } else if (strncmp (idxdata[line], "align:", 6) == 0) {
-      fprintf (fo, "  Alignment (relative to origin): ");
-
-      // Text format
-      if ((idxdata[line][8] < '0') || (idxdata[line][8] > '8')) {
-        i = 7;
-        while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-          if ((idxdata[line][i] != '\r') && (idxdata[line][i] != '\n')) {
-            fprintf (fo, "%c", idxdata[line][i]);
-            i++;
-          } else {
-            break;
-          }
-        }
-        fprintf (fo, "\n");
-
-      // Numerical index format
-      } else {
-        sscanf (idxdata[line] + 7, "%d", &align);
-        switch (align) {
-          case 0:
-            fprintf (fo, "0 (bottom-center)\n");
-            break;
-          case 1:
-            fprintf (fo, "1 (bottom-left)\n");
-            break;
-          case 2:
-            fprintf (fo, "2 (bottom-right)\n");
-            break;
-          case 3:
-            fprintf (fo, "3 (middle-center)\n");
-            break;
-          case 4:
-            fprintf (fo, "4 (middle-left)\n");
-            break;
-          case 5:
-            fprintf (fo, "5 (middle-right)\n");
-            break;
-          case 6:
-            fprintf (fo, "6 (top-center)\n");
-            break;
-          case 7:
-            fprintf (fo, "7 (top-left)\n");
-            break;
-          case 8:
-            fprintf (fo, "8 (top-right)\n");
-            break;
-          default:
-            fprintf (stderr, "Unknown alignment in IDX file: %s\n", idxdata[line]);
-            exit (EXIT_FAILURE);
-        }
-      }
-
-    // Time offset - Time offset from start of video stream; applies to all subtitles equally
+      print_value (fo, "Alignment (relative to origin): ", idxdata[line], 6);
     } else if (strncmp (idxdata[line], "time offset:", 12) == 0) {
-      fprintf (fo, "  Time offset: ");
-
-      // Determine offset format.
-      offset_format = 0;  // Default to single value (ms)
-      i = 13;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\r') && (idxdata[line][i] != '\n')) {
-          if (idxdata[line][i] == ':') {
-            offset_format = 1;  // Format is hh:mm:ss:ms, where ms is 3 digits and hh may be preceded by a - sign.
-          }
-          i++;
-        } else {
-          break;
-        }
-      }
-
-      // hh:mm:ss:ms format
-      if (offset_format) {
-        i = 13;
-        while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-          if ((idxdata[line][i] != '\r') && (idxdata[line][i] != '\n')) {
-            fprintf (fo, "%c", idxdata[line][i]);
-            i++;
-          } else {
-            break;
-          }
-        }
-        fprintf (fo, "\n");
-
-      // Milliseconds format
-      } else {
-        sscanf (idxdata[line] + 12, "%li", &idx->time_offset.totalms);
-        mstotime (&idx->time_offset);
-        fprintf (fo, "%02i:%02i:%02i,%03i (total ms: %" PRIu64 ")\n", idx->time_offset.h, idx->time_offset.m, idx->time_offset.s, idx->time_offset.ms, idx->time_offset.totalms);
-      }
-
-    // Delay (ms)
+      print_value (fo, "Time offset: ", idxdata[line], 12);
     } else if (strncmp (idxdata[line], "delay:", 6) == 0) {
-      fprintf (fo, "  Delay (ms): ");
-      i = 7;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n");
-
-    // Custom colors
+      print_value (fo, "Delay (ms): ", idxdata[line], 6);
     } else if (strncmp (idxdata[line], "custom colors:", 14) == 0) {
-      fprintf (fo, "  Custom colors: ");
-      i = 15;
-      while (i < strnlen (idxdata[line], MAX_STRINGLEN)) {
-        if ((idxdata[line][i] != '\n') && (idxdata[line][i] != '\r')) {
-          fprintf (fo, "%c", idxdata[line][i]);
-          i++;
-        } else {
-          break;
-        }
-      }
-      fprintf (fo, "\n");
+      print_value (fo, "Custom colors: ", idxdata[line], 14);
+    }
+  }
 
-    }  // End pattern matching to keywords
-  }  // Next line from file
+  if (id != expected_ids) {
+    fprintf (stderr, "IDX language count changed between scans (%zu vs %zu).\n", expected_ids, id);
+    return EXIT_FAILURE;
+  }
+  fprintf (fo, "  %zu Language IDs found\n", id);
 
-  idx->n_id = id;
-
-  fprintf (fo, "  %zu Language IDs found\n", idx->n_id);
-
-  // Scan through lines of .idx file and extract all subtitle offsets for each language.
-  lang = 0;  // Array index of array offset
-  line = 0;  // Line of .idx file
-  while ((line < n_idxlines) && (lang < idx->n_id)) {
-
-    // Search for a language ID.
+  // Second pass: associate every timestamp/filepos line with the most recently
+  // declared language.  Comments or other keywords between timestamps are okay.
+  lang = SIZE_MAX;
+  for (line = 0; line < n_idxlines; line++) {
     if (strncmp (idxdata[line], "id:", 3) == 0) {
-
-      // Move ahead to timestamps (there's often comment lines).
-      while (line < n_idxlines) {
-        if (strncmp (idxdata[line], "timestamp:", 10) == 0) break;
-        line++;
+      if (lang == SIZE_MAX) lang = 0;
+      else lang++;
+      if (lang >= expected_ids) {
+        fprintf (stderr, "Too many language sections in IDX file.\n");
+        return EXIT_FAILURE;
       }
-
-      // Extract the offsets for each timestamp (subtitle).
       idx->n_timestamps[lang] = 0;
-      while (line < n_idxlines) {
+      continue;
+    }
 
-        if (strncmp (idxdata[line], "timestamp:", 10) != 0) break;
+    if (strncmp (idxdata[line], "timestamp:", 10) != 0) continue;
+    if (lang == SIZE_MAX) {
+      fprintf (stderr, "Timestamp appears before the first language declaration in IDX file.\n");
+      return EXIT_FAILURE;
+    }
 
-        p = strstr (idxdata[line], "filepos:");
-        if (p) {
-          sscanf(p + 8, "%" SCNx64, &offset);
-          idx->offset[lang][idx->n_timestamps[lang]] = offset;
-          idx->n_timestamps[lang]++;  // Keep track of how many timestamps for this language.
-        }
+    p = find_nocase (idxdata[line], "filepos:");
+    if (p == NULL || parse_hex_offset (p + 8, &off) != EXIT_SUCCESS) {
+      fprintf (stderr, "Missing or invalid filepos in IDX timestamp line: %s", idxdata[line]);
+      return EXIT_FAILURE;
+    }
 
-        line++;  // Next line in .idx file
+    idx->offset[lang][idx->n_timestamps[lang]++] = off;
+  }
 
-      }  // Next timestamp
+  for (lang = 0; lang < expected_ids; lang++) {
+    fprintf (fo, "  Found %zu offsets to subtitles for Language ID: %zu (%s)\n",
+             idx->n_timestamps[lang], idx->id_index[lang], idx->id[lang]);
+  }
 
-      fprintf (fo, "  Found %zu offsets to subtitles for Language ID: %zu (%s)\n", idx->n_timestamps[lang], idx->id_index[lang], idx->id[lang]);
-      lang++;  // Next language
-
-    }  // End if found "id:"
-
-    line++;
-
-  }  // Continue through lines of .idx file.
-
-  return (EXIT_SUCCESS);
+  return EXIT_SUCCESS;
 }

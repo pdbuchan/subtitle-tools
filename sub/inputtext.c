@@ -20,13 +20,25 @@
 int
 inputtext (char *text) {
 
-  // Request new text from standard input.
-  fgets (text, MAX_STRINGLEN, stdin);
+  size_t len;
 
-  // Remove trailing newline, if there.
-  if ((strnlen (text, MAX_STRINGLEN) > 0) && (text[strnlen (text, MAX_STRINGLEN) - 1] == '\n')) {
-    text[strnlen (text, MAX_STRINGLEN) - 1] = '\0';  // Replace newline with string termination.
+  if (fgets (text, MAX_STRINGLEN, stdin) == NULL) {
+    fprintf (stderr, "Unable to read text from standard input.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  len = strlen (text);
+  if (len > 0 && text[len - 1] == '\n') {
+    text[len - 1] = '\0';
+  } else if (len == MAX_STRINGLEN - 1) {
+    int ch;
+    while ((ch = getchar ()) != '\n' && ch != EOF) {
+      // Discard the remainder of an overlong input line.
+    }
+    fprintf (stderr, "Input text is too long; maximum is %d characters.\n", MAX_STRINGLEN - 2);
+    exit (EXIT_FAILURE);
   }
 
   return (EXIT_SUCCESS);
 }
+

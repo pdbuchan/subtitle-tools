@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -18,150 +18,93 @@
 
 // Display Definition Segment (DDS)
 // Reference: ETSI EN 300 743
-int       
-parse_dds (STATE *state, PAGE **, size_t *offset, SEGMENT *segment, FILE *fo) {
+int
+parse_dds (STATE *state, PAGE **page, size_t *offset, SEGMENT *segment, FILE *fo) {
 
-  size_t segment_length;
-  uint8_t sync_byte, segment_type, dds_version_number, display_window_flag;
-  uint16_t page_id, display_width, display_height, display_window_h_pos_min, display_window_h_pos_max;
-  uint16_t pid, display_window_v_pos_min, display_window_v_pos_max;
+  size_t body_len, end;
+  uint8_t *buf, window_flag, version;
+  uint16_t pid, page_id, width_minus_1, height_minus_1;
 
+  (void) page;
   pid = state->pid;
-
+  buf = segment[pid].buffer;
   fprintf (fo, "\n  Display Definition Segment (DDS)\n");
 
-  // Sync Byte (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-    exit (EXIT_FAILURE);
+  // Every DVB subtitle segment starts with a 6-byte segment header.
+  if (!bytes_available (*offset, 6, segment[pid].length) ||
+      buf[*offset] != 0x0f || buf[*offset + 1] != 0x14) {
+    fprintf (stderr, "Invalid or truncated DDS header.\n");
+    return (EXIT_FAILURE);
   }
-  sync_byte = segment[pid].buffer[*offset];
-  if (sync_byte != 0x0f) {
-    fprintf (stderr, "Sync byte not found in parse_dds().\n");
-    fprintf (stderr, "Found: 0x%02x\n", sync_byte);
-    exit (EXIT_FAILURE);
-  }         
-  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", sync_byte);
-  (*offset)++;
-
-  // Segment Type (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-    exit (EXIT_FAILURE);
-  }
-  segment_type = segment[pid].buffer[*offset];
-  if (segment_type != 0x14) {
-    fprintf (stderr, "Wrong Segment Type found in parse_dds().\n");
-    fprintf (stderr, "Found: 0x%02x\n", segment_type);
-    exit (EXIT_FAILURE);
-  }         
-  segment_types (state, segment_type, fo);
-  (*offset)++;
-
+  // Sync Byte (1 byte) and Segment Type (1 byte)
+  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", buf[*offset]);
+  segment_types (state, buf[*offset + 1], fo);
   // Page ID (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-    exit (EXIT_FAILURE);
-  }
-  page_id = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-  fprintf (fo, "    Page ID (2 bytes): 0x%04x\n", page_id);
-  (*offset) += 2;
-
+  page_id = (uint16_t) (((uint16_t) buf[*offset + 2] << 8) | buf[*offset + 3]);
   // Segment Length (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-    exit (EXIT_FAILURE);
+  body_len = (size_t) (((uint16_t) buf[*offset + 4] << 8) | buf[*offset + 5]);
+  fprintf (fo, "    Page ID (2 bytes): 0x%04x\n", page_id);
+  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", body_len);
+  *offset += 6;
+
+  // The fixed part of a DDS body occupies 5 bytes.
+  if (!bytes_available (*offset, body_len, segment[pid].length) || body_len < 5) {
+    fprintf (stderr, "Invalid or truncated DDS body.\n");
+    return (EXIT_FAILURE);
   }
-  segment_length = (size_t) ((segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1]);
-  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", segment_length);
-  (*offset) += 2;
+  end = *offset + body_len;
 
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // DDS Version Number (4 bits)
-  dds_version_number = (segment[pid].buffer[*offset] >> 4) & 0x0f;  // 0x0f = 1111
-  fprintf (fo, "    DDS Version Number (4 bits): 0x%02x\n", dds_version_number);
-
-  // Display Window Flag (1 bit)
-  display_window_flag = (segment[pid].buffer[*offset] >> 3) & 1;
-  fprintf (fo, "    Display Window Flag (1 bit): %u\n", display_window_flag);
-
-  // Reserved (3 bits)
-
+  // DDS Version Number (4 bits) and Display Window Flag (1 bit).
+  // The remaining 3 bits of this byte are reserved.
+  version = (buf[*offset] >> 4) & 0x0f;
+  window_flag = (buf[*offset] >> 3) & 1;
   (*offset)++;
+  // Display Width (2 bytes) is coded as the maximum horizontal coordinate,
+  // therefore the number of displayed pixels is display_width + 1.
+  width_minus_1 = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+  *offset += 2;
+  // Display Height (2 bytes) is coded in the same way.
+  height_minus_1 = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+  *offset += 2;
 
-  // Display Width (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-    exit (EXIT_FAILURE);
-  }
-  display_width = (segment[pid].buffer[*offset] << 8) |
-                   segment[pid].buffer[(*offset) + 1];
-  state->display_width = display_width;
-  fprintf (fo, "    Display Width (2 bytes): %u px\n", display_width + 1);
-  (*offset) += 2;
+  state->display_width = width_minus_1;
+  state->display_height = height_minus_1;
+  fprintf (fo, "    DDS Version Number (4 bits): 0x%02x\n", version);
+  fprintf (fo, "    Display Window Flag (1 bit): %u\n", window_flag);
+  fprintf (fo, "    Display Width (2 bytes): %u px\n", (unsigned) width_minus_1 + 1U);
+  fprintf (fo, "    Display Height (2 bytes): %u px\n", (unsigned) height_minus_1 + 1U);
 
-  // Display Height (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-    exit (EXIT_FAILURE);
-  }
-  display_height = (segment[pid].buffer[*offset] << 8) |
-                   segment[pid].buffer[(*offset) + 1];
-  state->display_height = display_height;
-  fprintf (fo, "    Display Height (2 bytes): %u px\n", display_height + 1);
-  (*offset) += 2;
-
-  // Display Window Minima and Maxima
-  // We'll compute the necessary dimenions from the final composition of regions and objects for the page to be rendered.
-  if (display_window_flag) {
-
+  // If a display window is present, retrieve its horizontal and vertical
+  // minima and maxima. The values are reported even though composition bounds
+  // are determined from the regions and objects actually rendered.
+  if (window_flag) {
+    uint16_t hmin, hmax, vmin, vmax;
+    if (!bytes_available (*offset, 8, end)) {
+      fprintf (stderr, "Truncated DDS display-window fields.\n");
+      return (EXIT_FAILURE);
+    }
     // Display Window Horizontal Position Minimum (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-      exit (EXIT_FAILURE);
-    }
-    display_window_h_pos_min = (segment[pid].buffer[*offset] << 8) |
-                   segment[pid].buffer[(*offset) + 1];
-    fprintf (fo, "    Display Window Horizontal Position Minimum (2 bytes): %u px\n", display_window_h_pos_min);
-    (*offset) += 2;
-
+    hmin = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+    *offset += 2;
     // Display Window Horizontal Position Maximum (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-      exit (EXIT_FAILURE);
-    }
-    display_window_h_pos_max = (segment[pid].buffer[*offset] << 8) |
-                   segment[pid].buffer[(*offset) + 1];
-    fprintf (fo, "    Display Window Horizontal Position Maximum (2 bytes): %u px\n", display_window_h_pos_max);
-    (*offset) += 2;
-
+    hmax = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+    *offset += 2;
     // Display Window Vertical Position Minimum (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-      exit (EXIT_FAILURE);
-    }
-    display_window_v_pos_min = (segment[pid].buffer[*offset] << 8) |
-                   segment[pid].buffer[(*offset) + 1];
-    fprintf (fo, "    Display Window Vertical Position Minimum (2 bytes): line %u\n", display_window_v_pos_min);
-    (*offset) += 2;
-
+    vmin = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+    *offset += 2;
     // Display Window Vertical Position Maximum (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_dds().\n");
-      exit (EXIT_FAILURE);
-    }
-    display_window_v_pos_max = (segment[pid].buffer[*offset] << 8) |
-                   segment[pid].buffer[(*offset) + 1];
-    fprintf (fo, "    Display Window Vertical Position Maximum (2 bytes): line %u\n", display_window_v_pos_max);
-    (*offset) += 2;
+    vmax = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+    *offset += 2;
+    fprintf (fo, "    Display Window Horizontal Position Minimum: %u px\n", hmin);
+    fprintf (fo, "    Display Window Horizontal Position Maximum: %u px\n", hmax);
+    fprintf (fo, "    Display Window Vertical Position Minimum: %u lines\n", vmin);
+    fprintf (fo, "    Display Window Vertical Position Maximum: %u lines\n", vmax);
+  }
 
-  }  // End if display_window_flag
-
+  // The decoder should finish exactly at the end declared by segment_length.
+  if (*offset != end) {
+    fprintf (stderr, "DDS segment length does not match its fields.\n");
+    return (EXIT_FAILURE);
+  }
   return (EXIT_SUCCESS);
 }

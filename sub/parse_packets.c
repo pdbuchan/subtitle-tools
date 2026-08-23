@@ -19,30 +19,37 @@
 // Parse all MPEG-2 packetized elementary stream (PES) packets needed to compose one complete Subpicture Unit (SPU).
 // Store complete SPU in spu_buffer array.
 int
-parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *spu_buffer, int timestamp, IDX *idx, int lang, PES *pes_info, SUB *sub_info, FILE *fo) {
+parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen,
+               uint8_t **spu_buffer, size_t *spu_buffer_size, size_t timestamp,
+               IDX *idx, size_t lang, PES *pes_info, SUB *sub_info, FILE *fo) {
 
-  int64_t temp;
-  ssize_t pes_hdr_data_len, header_used;
-  size_t i, pos, spu_pos, pack_stuffing_len, packet_top, spu_chunk_len;
+  ssize_t pes_hdr_data_len;
+  size_t header_used;
+  size_t i, pos, spu_pos, pack_stuffing_len, packet_top, packet_end, spu_chunk_len, header_data_end;
+  size_t prefix_len, remaining;
+  size_t declared_spu_size;
   uint8_t pack_id, stream_id, scrambling_ctrl, pes_priority, alignment_indic, copyright, copy_orig;
   uint8_t ptsdts, escr, esrate_flag, dsmtrickmode, add_copyinfo, crc_flag, extension, private, pack_header, seq_counter, pstd_buffer, extension2;
-  uint8_t seq_counter_val, mpeg1or2, orig_stuff_len, pack_header_field_len, pstd_buffer_scale, ext2_len, first_packet, substreamid, stream;
-  uint16_t crc, scr_ext, escr_ext, spu_sz;
+  uint8_t seq_counter_val, mpeg1or2, orig_stuff_len, pack_header_field_len, pstd_buffer_scale, ext2_len, substreamid, stream;
+  uint8_t have_start_pts, spu_prefix[6];
+  uint16_t crc, scr_ext, escr_ext;
   uint32_t program_mux_raw, program_mux_rate, esrate_raw, esrate, kbps, pstd_buffer_size;
   uint64_t scr_27mhz, scr_base, scr_ms, escr_27mhz, escr_base, escr_ms, pts90, dts90;
-  double ratio;
 
   fprintf (fo, "  BUILDING SPU BUFFER FROM MPEG-2 PES PACKET(S)\n\n");
   pos = idx->offset[lang][timestamp];  // First packet starts at index specified by .idx file.
-  spu_pos = 0;  // Index of spu_buffer
-
-  // Compute scaling ratio for sync option.
-  ratio = (((double) options->newlastms - (double) options->newfirstms) / ((double) options->oldlastms - (double) options->oldfirstms));
+  spu_pos = 0;
+  declared_spu_size = 0;
+  *spu_buffer_size = 0;
+  free (*spu_buffer);
+  *spu_buffer = NULL;
 
   // Loop through all MPEG-2 PES packets needed to compose SPU.
   // If the SPU data size if larger than PES packet length then the SPU data spans multiple packets.
   // Obtain SPU_SZ from 1st packet, keep adding SPU data from packets to spu_buffer while reducing spu_sz accordingly, until spu_sz == 0.
-  first_packet = 1;
+  have_start_pts = 0;
+  prefix_len = 0;
+  memset (spu_prefix, 0, sizeof (spu_prefix));
   do {
 
     // MPEG-2 Pack header (The first one is at offset defined in .idx file) (4 bytes)
@@ -175,14 +182,23 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     fprintf (fo, "    PES Packet Length (2 bytes): %zu bytes\n", pes_info->pes_packet_len);
     pos += 2;
     packet_top = pos;
+    if (pes_info->pes_packet_len != 0) {
+      if (pes_info->pes_packet_len > subdatalen - packet_top) {
+        fprintf (stderr, "PES packet length extends beyond end of .sub file.\n");
+        return (EXIT_FAILURE);
+      }
+      packet_end = packet_top + pes_info->pes_packet_len;
+    } else {
+      packet_end = subdatalen;
+    }
 
     // Packetized Elementary Stream (PES) Header Extension
     fprintf (fo, "\n  PACKETIZED ELEMENTARY STREAM (PES) HEADER EXTENSION\n");
 
     // 10 (2 bits)
-    if (pos >= subdatalen) {
+    if (pos >= packet_end) {
       fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-      exit (EXIT_FAILURE);
+      return (EXIT_FAILURE);
     }
     if ((subdata[pos] >> 6) != 2) {
       fprintf (stderr, "First byte 0x%02x of PES Header Extension doesn't have 2 MSBs as binary 10\n", subdata[pos] >> 6);
@@ -227,9 +243,9 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     pos++;
 
     // Presentation Time Stamp (PTS) / Decode Time Stamp (DTS) flag (2 bits)
-    if (pos >= subdatalen) {
+    if (pos >= packet_end) {
       fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-      exit (EXIT_FAILURE);
+      return (EXIT_FAILURE);
     }
     ptsdts = subdata[pos] >> 6;
     if (ptsdts == 0) {
@@ -289,132 +305,122 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     pos++;
 
     // PES Header Data Length (1 byte)
-    if (pos >= subdatalen) {
+    if (pos >= packet_end) {
       fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-      exit (EXIT_FAILURE);
+      return (EXIT_FAILURE);
     }
     pes_hdr_data_len = (ssize_t) subdata[pos];
     fprintf (fo, "    PES header data length (1 byte): %zd bytes\n", pes_hdr_data_len);
     pos++;
+    if ((size_t) pes_hdr_data_len > packet_end - pos) {
+      fprintf (stderr, "PES header data length exceeds PES packet boundary.\n");
+      return (EXIT_FAILURE);
+    }
+    header_data_end = pos + (size_t) pes_hdr_data_len;
 
     // Process PES flags.
 
-    // PTS (33 bits); PTS only, or PTS & DTS
+    // PTS (33 bits); PTS only, or PTS & DTS.
     if ((ptsdts == 2) || (ptsdts == 3)) {
 
-      if ((pos + 4) >= subdatalen) {
-        fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-        exit (EXIT_FAILURE);
+      uint64_t adjusted90;
+      uint8_t pts_prefix;
+
+      if (pos > header_data_end || 5 > header_data_end - pos) {
+        fprintf (stderr, "Unexpectedly reached end of PES packet while reading PTS.\n");
+        return (EXIT_FAILURE);
       }
 
-      // Extract PTS.
-      pes_info->pts.totalms =
-        ((int64_t) (subdata[pos]     & 0x0e) << 29) |  // 0x0e = 1110
-        ((int64_t) (subdata[pos + 1]) << 22) |
-        ((int64_t) (subdata[pos + 2] & 0xfe) << 14) |  // 0xfe = 1111 1110
-        ((int64_t) (subdata[pos + 3]) << 7) |
-        ((int64_t) (subdata[pos + 4] & 0xfe) >> 1);
+      pts90 =
+        ((uint64_t) (subdata[pos]     & 0x0e) << 29) |
+        ((uint64_t)  subdata[pos + 1]          << 22) |
+        ((uint64_t) (subdata[pos + 2] & 0xfe) << 14) |
+        ((uint64_t)  subdata[pos + 3]          << 7)  |
+        ((uint64_t) (subdata[pos + 4] & 0xfe) >> 1);
 
-      // Convert to ms via integer math.
-      pes_info->pts.totalms = (pes_info->pts.totalms + 45) / 90;
-      mstotime (&pes_info->pts);
+      pes_info->pts90 = pts90;
+      pes_info->pts.totalms = (int64_t) ((pts90 + 45u) / 90u);
+      if (mstotime (&pes_info->pts) != EXIT_SUCCESS) return (EXIT_FAILURE);
 
-      fprintf (fo, "    PTS: %02d:%02d:%02d,%03d totalms: %" PRId64 "\n", pes_info->pts.h, pes_info->pts.m, pes_info->pts.s, pes_info->pts.ms, pes_info->pts.totalms);
+      fprintf (fo, "    PTS: %02d:%02d:%02d,%03d totalms: %" PRId64 " (90-kHz ticks: %" PRIu64 ")\n",
+               pes_info->pts.h, pes_info->pts.m, pes_info->pts.s, pes_info->pts.ms,
+               pes_info->pts.totalms, pts90);
 
-      // Apply offsets to PTS timestamp, if requested.
-      if (options->offset_flag) {
-        temp = pes_info->pts.totalms + options->offset.totalms;
-        if (temp < 0) temp = 0;
-        pes_info->pts.totalms = temp;
-        mstotime (&pes_info->pts);
-
-        // Record new PTS in changes array.
-        pts90 = (uint64_t) pes_info->pts.totalms * 90u;
-        record_pes_timestamp_change (options, pos, pts90, 0x20);
-
-      // Synchronize PTS timestamp, if requested.
-      } else if (options->sync_flag) {
-
-        // Scale PTS.
-        pes_info->pts.totalms = (int64_t) (((double) options->newfirstms) + ((((double) pes_info->pts.totalms) - ((double) options->oldfirstms)) * ratio));
-        mstotime (&pes_info->pts);
-
-        // Record new PTS in changes array.
-        pts90 = (uint64_t) pes_info->pts.totalms * 90u;
-        record_pes_timestamp_change (options, pos, pts90, 0x20);
+      if (options->offset_flag || options->sync_flag) {
+        if (transform_timestamp90 (options, pts90, &adjusted90) != EXIT_SUCCESS) return (EXIT_FAILURE);
+        pts_prefix = (ptsdts == 3) ? 0x30 : 0x20;
+        record_pes_timestamp_change (options, pos, adjusted90, pts_prefix);
+        pes_info->pts90 = adjusted90;
+        pes_info->pts.totalms = (int64_t) ((adjusted90 + 45u) / 90u);
+        if (mstotime (&pes_info->pts) != EXIT_SUCCESS) return (EXIT_FAILURE);
+        fprintf (fo, "    Adjusted PTS: %02d:%02d:%02d,%03d (90-kHz ticks: %" PRIu64 ")\n",
+                 pes_info->pts.h, pes_info->pts.m, pes_info->pts.s, pes_info->pts.ms, adjusted90);
       }
 
-      sub_info->start = pes_info->pts;  // Make the subtitle start time equal to the PTS.
-      pes_info->dts.totalms = 0;  // Dummy value
-      mstotime (&pes_info->dts);
-      pos += 5;  // Move past PTS data.
+      if (!have_start_pts) {
+        sub_info->start = pes_info->pts;
+        have_start_pts = 1;
+      }
+      pes_info->dts90 = 0;
+      memset (&pes_info->dts, 0, sizeof (pes_info->dts));
+
+      pos += 5;
       pes_hdr_data_len -= 5;
       if (pes_hdr_data_len < 0) {
         fprintf (stderr, "pes_hdr_data_len has gone negative in parse_packets().\n");
-        exit (EXIT_FAILURE);
+        return (EXIT_FAILURE);
       }
-
     }
 
-    // PTS and DTS (33 bits each)
-    // Already extracted PTS.
+    // DTS (33 bits), when both PTS and DTS are present.
     if (ptsdts == 3) {
 
-      if ((pos + 4) >= subdatalen) {
-        fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-        exit (EXIT_FAILURE);
-      }
-      // Extract DTS.
-      pes_info->dts.totalms =
-        ((int64_t) (subdata[pos]  & 0x0e)) << 29 |     // Bits 32..30; 0x0e = 1110
-        ((int64_t)  subdata[pos + 1]) << 22 |          // Bits 29..22
-        ((int64_t) (subdata[pos + 2] & 0xfe)) << 14 |  // Bits 21..15; 0xfe = 1111 1110
-        ((int64_t)  subdata[pos + 3]) << 7 |           // Bits 14..7
-        ((int64_t) (subdata[pos + 4] & 0xfe)) >> 1;    // Bits 6..0
+      uint64_t adjusted90;
 
-      // Convert to ms via integer math.
-      pes_info->dts.totalms = (pes_info->dts.totalms + 45) / 90;
-      mstotime (&pes_info->dts);
-
-      fprintf (fo, "    DTS: %02d:%02d:%02d,%03d totalms: %" PRId64 "\n", pes_info->dts.h, pes_info->dts.m, pes_info->dts.s, pes_info->dts.ms, pes_info->dts.totalms);
-
-      // Apply offsets to DTS timestamp, if requested.
-      if (options->offset_flag) {
-        temp = pes_info->dts.totalms + options->offset.totalms;
-        if (temp < 0) temp = 0;
-        pes_info->dts.totalms = temp;
-        mstotime (&pes_info->dts);
-    
-        // Record new DTS in changes array.
-        dts90 = (uint64_t) pes_info->dts.totalms * 90u;
-        record_pes_timestamp_change (options, pos, dts90, 0x10);
-
-      // Synchronize DTS timestamp, if requested. 
-      } else if (options->sync_flag) {
-
-        // Scale DTS.
-        pes_info->dts.totalms = (int64_t) (((double) options->newfirstms) + ((((double) pes_info->dts.totalms) - ((double) options->oldfirstms)) * ratio));
-        mstotime (&pes_info->dts);
-
-        // Record new DTS in changes array.
-        dts90 = (uint64_t) pes_info->dts.totalms * 90u;
-        record_pes_timestamp_change (options, pos, dts90, 0x10);
+      if (pos > header_data_end || 5 > header_data_end - pos) {
+        fprintf (stderr, "Unexpectedly reached end of PES packet while reading DTS.\n");
+        return (EXIT_FAILURE);
       }
 
-      pos += 5;  
+      dts90 =
+        ((uint64_t) (subdata[pos]     & 0x0e) << 29) |
+        ((uint64_t)  subdata[pos + 1]          << 22) |
+        ((uint64_t) (subdata[pos + 2] & 0xfe) << 14) |
+        ((uint64_t)  subdata[pos + 3]          << 7)  |
+        ((uint64_t) (subdata[pos + 4] & 0xfe) >> 1);
+
+      pes_info->dts90 = dts90;
+      pes_info->dts.totalms = (int64_t) ((dts90 + 45u) / 90u);
+      if (mstotime (&pes_info->dts) != EXIT_SUCCESS) return (EXIT_FAILURE);
+
+      fprintf (fo, "    DTS: %02d:%02d:%02d,%03d totalms: %" PRId64 " (90-kHz ticks: %" PRIu64 ")\n",
+               pes_info->dts.h, pes_info->dts.m, pes_info->dts.s, pes_info->dts.ms,
+               pes_info->dts.totalms, dts90);
+
+      if (options->offset_flag || options->sync_flag) {
+        if (transform_timestamp90 (options, dts90, &adjusted90) != EXIT_SUCCESS) return (EXIT_FAILURE);
+        record_pes_timestamp_change (options, pos, adjusted90, 0x10);
+        pes_info->dts90 = adjusted90;
+        pes_info->dts.totalms = (int64_t) ((adjusted90 + 45u) / 90u);
+        if (mstotime (&pes_info->dts) != EXIT_SUCCESS) return (EXIT_FAILURE);
+        fprintf (fo, "    Adjusted DTS: %02d:%02d:%02d,%03d (90-kHz ticks: %" PRIu64 ")\n",
+                 pes_info->dts.h, pes_info->dts.m, pes_info->dts.s, pes_info->dts.ms, adjusted90);
+      }
+
+      pos += 5;
       pes_hdr_data_len -= 5;
       if (pes_hdr_data_len < 0) {
         fprintf (stderr, "pes_hdr_data_len has gone negative in parse_packets().\n");
-        exit (EXIT_FAILURE);
+        return (EXIT_FAILURE);
       }
     }
 
     // Elementary Stream Clock Reference (ESCR) (6 bytes)
     if (escr) {
 
-      if ((pos + 5) >= subdatalen) {
-        fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-        exit (EXIT_FAILURE);
+      if (pos > header_data_end || 6 > header_data_end - pos) {
+        fprintf (stderr, "Unexpectedly reached end of PES header data while reading ESCR.\n");
+        return (EXIT_FAILURE);
       }
 
       // Elementary Stream Clock Reference (ESCR) Base (33 bits)
@@ -450,9 +456,9 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     // Elementary Stream Rate (3 bytes)
     if (esrate_flag) {
 
-      if ((pos + 2) >= subdatalen) {
-        fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-        exit (EXIT_FAILURE);
+      if (pos > header_data_end || 3 > header_data_end - pos) {
+        fprintf (stderr, "Unexpectedly reached end of PES header data while reading ES rate.\n");
+        return (EXIT_FAILURE);
       }
       esrate_raw =
         ((uint32_t)subdata[pos]     << 16) |
@@ -476,9 +482,9 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     // Additional Copy Info (1 byte)
     if (add_copyinfo) {
 
-      if (pos >= subdatalen) {
-        fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-        exit (EXIT_FAILURE);
+      if (pos >= header_data_end) {
+        fprintf (stderr, "Unexpectedly reached end of PES header data while reading Additional Copy Info.\n");
+        return (EXIT_FAILURE);
       }
 
       fprintf (fo, "    Additional Copy Info (1 byte): 0x%02x\n", subdata[pos]);
@@ -493,9 +499,9 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     // Previous PES packet CRC (2 bytes)
     if (crc_flag) {
 
-      if ((pos + 1) >= subdatalen) {
-        fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-        exit (EXIT_FAILURE);
+      if (pos > header_data_end || 2 > header_data_end - pos) {
+        fprintf (stderr, "Unexpectedly reached end of PES header data while reading CRC.\n");
+        return (EXIT_FAILURE);
       }
 
       crc = (subdata[pos] << 8) | subdata[pos+1];
@@ -511,9 +517,9 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     // PES Extension flags (1 byte)
     if (extension) {
 
-      if (pos >= subdatalen) {
-        fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-        exit (EXIT_FAILURE);
+      if (pos >= header_data_end) {
+        fprintf (stderr, "Unexpectedly reached end of PES header data while reading PES extension flags.\n");
+        return (EXIT_FAILURE);
       }
 
       if (((subdata[pos] >> 1) & 7) != 7) {
@@ -574,9 +580,9 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
       // PES Private Data (16 bytes)
       if (private) {
 
-        if ((pos + 15) >= subdatalen) {
-          fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-          exit (EXIT_FAILURE);
+        if (pos > header_data_end || 16 > header_data_end - pos) {
+          fprintf (stderr, "Truncated PES Private Data.\n");
+          return (EXIT_FAILURE);
         }
         fprintf (fo, "    PES Private Data (16 bytes): ");
         for (i = 0; i < 16; i++) {
@@ -591,12 +597,12 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
         }
       }
 
-      // Pack Header Field Length (1 byte)
+      // Pack Header Field Length (1 byte), followed by that many bytes of pack header data.
       if (pack_header) {
 
-        if (pos >= subdatalen) {
-          fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-          exit (EXIT_FAILURE);
+        if (pos >= header_data_end) {
+          fprintf (stderr, "Truncated Pack Header Field Length.\n");
+          return (EXIT_FAILURE);
         }
         pack_header_field_len = subdata[pos];
         fprintf (fo, "    Pack Header Field Length (1 byte): %u bytes\n", pack_header_field_len);
@@ -604,16 +610,31 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
         pes_hdr_data_len--;
         if (pes_hdr_data_len < 0) {
           fprintf (stderr, "pes_hdr_data_len has gone negative in parse_packets().\n");
-          exit (EXIT_FAILURE);
+          return (EXIT_FAILURE);
+        }
+        if ((size_t) pack_header_field_len > header_data_end - pos) {
+          fprintf (stderr, "Truncated Pack Header Field data.\n");
+          return (EXIT_FAILURE);
+        }
+        fprintf (fo, "    Pack Header Field data (%u bytes):", pack_header_field_len);
+        for (i = 0; i < pack_header_field_len; i++) {
+          fprintf (fo, " %02x", subdata[pos + i]);
+        }
+        fprintf (fo, "\n");
+        pos += pack_header_field_len;
+        pes_hdr_data_len -= pack_header_field_len;
+        if (pes_hdr_data_len < 0) {
+          fprintf (stderr, "pes_hdr_data_len has gone negative in parse_packets().\n");
+          return (EXIT_FAILURE);
         }
       }
 
       // Program Packet Sequence Counter (2 bytes)
       if (seq_counter) {
 
-        if ((pos + 1) >= subdatalen) {
-          fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-          exit (EXIT_FAILURE);
+        if (pos > header_data_end || 2 > header_data_end - pos) {
+          fprintf (stderr, "Truncated Program Packet Sequence Counter.\n");
+          return (EXIT_FAILURE);
         }
 
         // 1 (1 bit)
@@ -649,24 +670,28 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
       // P-STD Buffer (2 bytes)
       if (pstd_buffer) {
 
-        if ((pos + 1) >= subdatalen) {
-          fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-          exit (EXIT_FAILURE);
+        if (pos > header_data_end || 2 > header_data_end - pos) {
+          fprintf (stderr, "Truncated P-STD Buffer data.\n");
+          return (EXIT_FAILURE);
         }
 
         // P-STD Buffer Scale (1 bit)
         pstd_buffer_scale = (subdata[pos] >> 5) & 1;
 
-        // P-STD Buffer Size (12 bits)
-        pstd_buffer_size = ((subdata[pos] & 31) << 12) | subdata[pos + 1];  // 0x1f = 0001 1111
+        // P-STD Buffer Size (13 bits).  The encoded value is multiplied by
+        // 128 or 1024 bytes according to P-STD_buffer_scale.
+        pstd_buffer_size = ((uint32_t) (subdata[pos] & 0x1f) << 8) | subdata[pos + 1];
 
         fprintf (fo, "    P-STD Buffer:\n");
         if (!pstd_buffer_scale) {
           fprintf (fo, "      Scale (1 bit): 128 bytes\n");
+          fprintf (fo, "      Size (13 bits): %u units = %u bytes\n",
+                   pstd_buffer_size, pstd_buffer_size * 128u);
         } else {
           fprintf (fo, "      Scale (1 bit): 1024 bytes\n");
+          fprintf (fo, "      Size (13 bits): %u units = %u bytes\n",
+                   pstd_buffer_size, pstd_buffer_size * 1024u);
         }
-        fprintf (fo, "      Size (12 bits): %u bytes\n", pstd_buffer_size);
         pos += 2;
         pes_hdr_data_len -= 2;
         if (pes_hdr_data_len < 0) {
@@ -678,38 +703,43 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
       // PES Extension 2
       if (extension2) {
 
-        if (pos >= subdatalen) {
-          fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-          exit (EXIT_FAILURE);
+        if (pos >= header_data_end) {
+          fprintf (stderr, "Truncated PES Extension 2 length.\n");
+          return (EXIT_FAILURE);
         }
 
-        // PES Extension 2 Length (1 byte)
-        ext2_len = subdata[pos] & 0x7f;  // 0x7f = 0111 1111
+        // PES Extension 2 Length (7 bits), following a mandatory marker bit.
+        if ((subdata[pos] & 0x80) == 0) {
+          fprintf (stderr, "Missing marker bit in PES Extension 2 length byte.\n");
+          return (EXIT_FAILURE);
+        }
+        ext2_len = subdata[pos] & 0x7f;
         fprintf (fo, "    PES Extension 2 length (1 byte): %u bytes\n", ext2_len);
-
-        // Reserved (1 byte)
-
-        // Move past PES Extension 2 Field Length byte and reserved byte.
-        pos += 2;
-        pes_hdr_data_len -= 2;
+        pos++;
+        pes_hdr_data_len--;
         if (pes_hdr_data_len < 0) {
           fprintf (stderr, "pes_hdr_data_len has gone negative in parse_packets().\n");
-          exit (EXIT_FAILURE);
+          return (EXIT_FAILURE);
         }
 
-        // Move past PES extension 2 data.
-        if ((pos + ext2_len - 1) >= subdatalen) {
-          fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-          exit (EXIT_FAILURE);
+        // The length counts the bytes that follow the length byte; these are
+        // reserved/extension data.  It does not include an extra fixed byte.
+        if ((size_t) ext2_len > header_data_end - pos) {
+          fprintf (stderr, "Truncated PES Extension 2 data.\n");
+          return (EXIT_FAILURE);
         }
-        while (ext2_len > 0) {
-          pos++;
-          pes_hdr_data_len--;
-          if (pes_hdr_data_len < 0) {
-            fprintf (stderr, "pes_hdr_data_len has gone negative in parse_packets().\n");
-            exit (EXIT_FAILURE);
+        if (ext2_len > 0) {
+          fprintf (fo, "    PES Extension 2 data (%u bytes):", ext2_len);
+          for (i = 0; i < ext2_len; i++) {
+            fprintf (fo, " %02x", subdata[pos + i]);
           }
-          ext2_len--;
+          fprintf (fo, "\n");
+        }
+        pos += ext2_len;
+        pes_hdr_data_len -= ext2_len;
+        if (pes_hdr_data_len < 0) {
+          fprintf (stderr, "pes_hdr_data_len has gone negative in parse_packets().\n");
+          return (EXIT_FAILURE);
         }
       }
     }
@@ -719,9 +749,9 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
       fprintf (fo, "  PES header stuffing bytes: ");
 
       while (pes_hdr_data_len > 0) {
-        if (pos >= subdatalen) {
-          fprintf (stderr, "Unexpected end of PES packet in header stuffing.\n");
-          exit (EXIT_FAILURE);
+        if (pos >= header_data_end) {
+          fprintf (stderr, "Unexpected end of PES header data in stuffing bytes.\n");
+          return (EXIT_FAILURE);
         }
 
         fprintf (fo, "%02x ", subdata[pos]);
@@ -737,9 +767,9 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     // Range: 0x20 - 0x3f (i.e., Stream 0 to Stream 31)
     // 0x20 + stream number (e.g., 0x22 is Stream 2)
     // Maps to language in .idx. e.g., "id: nl, index: 0" means Stream 0 is Dutch
-    if (pos >= subdatalen) {
-      fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-      exit (EXIT_FAILURE);
+    if (pos >= packet_end) {
+      fprintf (stderr, "PES packet contains no DVD subpicture substream ID.\n");
+      return (EXIT_FAILURE);
     }
     substreamid = subdata[pos];
     if ((substreamid < 0x20) || (substreamid > 0x3f)) {
@@ -748,47 +778,106 @@ parse_packets (OPTIONS *options, uint8_t *subdata, size_t subdatalen, uint8_t *s
     } else {
       stream = substreamid - 0x20;
       fprintf (fo, "\n  Stream ID (1 byte): 0x%02x (DVD subpicture stream, Language Index: %u)\n\n", substreamid, stream);
+      if ((size_t) stream != idx->id_index[lang]) {
+        fprintf (stderr, "IDX filepos points to subpicture stream %u, but language %s expects stream %zu.\n",
+                 stream, idx->id[lang], idx->id_index[lang]);
+        return (EXIT_FAILURE);
+      }
     }
     pos++;
 
-    // Total size in bytes of SPU data (2 bytes)
-    // Only available in first packet of chain.
-    if (first_packet) {
-      if ((pos + 1) >= subdatalen) {
-        fprintf (stderr, "Unexpectedly reached end of PES packet in parse_packets().\n");
-        exit (EXIT_FAILURE);
-      }
-
-      spu_sz = (subdata[pos] << 8) | subdata[pos + 1];
-      first_packet = 0;
+    // Append this PES payload to the complete SPU.  The first 2 bytes are
+    // enough to distinguish classic from extended format; an extended header
+    // needs 6 bytes before its 32-bit total size is known.  Accumulating this
+    // small prefix allows even the extended header itself to cross a PES
+    // boundary.
+    if (pos > packet_end) {
+      fprintf (stderr, "PES header consumes more bytes than PES_packet_length permits.\n");
+      return (EXIT_FAILURE);
     }
-
-    // Append all available SPU data from this packet to the spu_buffer.
     header_used = pos - packet_top;
-    if (header_used >= pes_info->pes_packet_len) {
-      spu_chunk_len = 0;
-    } else {
-      if (pes_info->pes_packet_len == 0) {
-        spu_chunk_len = spu_sz;
-      } else {
-        spu_chunk_len = pes_info->pes_packet_len - header_used;
+    if (pes_info->pes_packet_len == 0) {
+      fprintf (stderr, "Private Stream 1 PES packet has zero PES_packet_length and cannot be safely delimited.\n");
+      return (EXIT_FAILURE);
+    }
+    if (header_used > pes_info->pes_packet_len) {
+      fprintf (stderr, "PES header exceeds PES_packet_length.\n");
+      return (EXIT_FAILURE);
+    }
+    spu_chunk_len = pes_info->pes_packet_len - header_used;
+    if (spu_chunk_len > packet_end - pos || spu_chunk_len > subdatalen - pos) {
+      fprintf (stderr, "Unexpected end of PES packet while locating SPU payload.\n");
+      return (EXIT_FAILURE);
+    }
+
+    while (declared_spu_size == 0 && spu_chunk_len > 0) {
+      size_t need;
+
+      if (prefix_len < 2) need = 2 - prefix_len;
+      else if (spu_prefix[0] == 0 && spu_prefix[1] == 0 && prefix_len < 6) need = 6 - prefix_len;
+      else need = 0;
+
+      if (need != 0) {
+        size_t take = need < spu_chunk_len ? need : spu_chunk_len;
+        memcpy (spu_prefix + prefix_len, subdata + pos, take);
+        prefix_len += take;
+        pos += take;
+        spu_chunk_len -= take;
+      }
+
+      if (prefix_len >= 2 && (spu_prefix[0] != 0 || spu_prefix[1] != 0)) {
+        declared_spu_size = ((size_t) spu_prefix[0] << 8) | spu_prefix[1];
+      } else if (prefix_len >= 6) {
+        declared_spu_size = ((size_t) spu_prefix[2] << 24) |
+                            ((size_t) spu_prefix[3] << 16) |
+                            ((size_t) spu_prefix[4] << 8) |
+                             (size_t) spu_prefix[5];
+      }
+
+      if (declared_spu_size != 0) {
+        size_t minimum = (spu_prefix[0] == 0 && spu_prefix[1] == 0) ? 10u : 4u;
+        if (declared_spu_size < minimum || declared_spu_size < prefix_len) {
+          fprintf (stderr, "Invalid declared SPU size %zu.\n", declared_spu_size);
+          return (EXIT_FAILURE);
+        }
+        *spu_buffer = malloc (declared_spu_size);
+        if (*spu_buffer == NULL) {
+          fprintf (stderr, "Cannot allocate %zu-byte SPU buffer.\n", declared_spu_size);
+          return (EXIT_FAILURE);
+        }
+        *spu_buffer_size = declared_spu_size;
+        memcpy (*spu_buffer, spu_prefix, prefix_len);
+        spu_pos = prefix_len;
+      } else if (prefix_len >= 6) {
+        fprintf (stderr, "Extended SPU declares a zero total size.\n");
+        return (EXIT_FAILURE);
+      } else if (spu_chunk_len == 0) {
+        break;
       }
     }
-    if (spu_chunk_len > spu_sz) spu_chunk_len = spu_sz;  // Protect against overrun for malformed packets.
-    if ((spu_pos + spu_chunk_len) > MAX_SPU_SIZE) {
-      fprintf (stderr, "spu_pos + spu_chunk_len > MAX_SPU_SIZE in parse_packets().\n");
-      exit (EXIT_FAILURE);
-    }
-    if ((pos + spu_chunk_len) >= subdatalen) {
-      fprintf (stderr, "Unexpected end of PES packet while copying SPU data.\n");
-      exit(EXIT_FAILURE);
-    }
-    memcpy (spu_buffer + spu_pos, &subdata[pos], spu_chunk_len * sizeof (char));
-    spu_pos += spu_chunk_len;  // Update the spu_buffer index.
-    pos += spu_chunk_len;
-    spu_sz -= spu_chunk_len;
 
-  } while ((spu_sz > 0) && (pos < subdatalen));  // Next MPEG-2 packet in chain, if any more are needed.
+    if (declared_spu_size != 0 && spu_chunk_len > 0) {
+      remaining = declared_spu_size - spu_pos;
+      if (spu_chunk_len > remaining) spu_chunk_len = remaining;
+      if (spu_chunk_len > packet_end - pos || spu_chunk_len > subdatalen - pos) {
+        fprintf (stderr, "Unexpected end of PES packet while copying SPU data.\n");
+        return (EXIT_FAILURE);
+      }
+      memcpy (*spu_buffer + spu_pos, subdata + pos, spu_chunk_len);
+      spu_pos += spu_chunk_len;
+      pos += spu_chunk_len;
+    }
+
+  } while ((declared_spu_size == 0 || spu_pos < declared_spu_size) && (pos < subdatalen));
+
+  if (declared_spu_size == 0 || spu_pos != declared_spu_size) {
+    fprintf (stderr, "Incomplete SPU: assembled %zu of %zu bytes.\n", spu_pos, declared_spu_size);
+    return (EXIT_FAILURE);
+  }
+  if (!have_start_pts) {
+    fprintf (stderr, "SPU PES chain contains no PTS.\n");
+    return (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }

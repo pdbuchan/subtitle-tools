@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -22,246 +22,161 @@ int
 parse_pcs (STATE *state, PAGE **page, size_t *offset, SEGMENT *segment, PES *pes, FILE *fo) {
 
   int temp;
-  size_t i, consumed, segment_length, nregion_pos, old_size, new_elements, page_idx;
-  uint8_t sync_byte, segment_type, page_time_out, page_version_number, page_state, region_id[MAX_REGIONS];
-  uint16_t pid, page_id, region_horizontal_address[MAX_REGIONS], region_vertical_address[MAX_REGIONS];
+  size_t body_len, end, page_idx, nregions, i;
+  uint8_t *buf, page_state;
+  uint16_t pid, page_id;
+  PAGE *pg;
   void *tmp;
 
-  memset (region_id, 0, MAX_REGIONS * sizeof (uint8_t));
-  memset (region_horizontal_address, 0, MAX_REGIONS * sizeof (uint16_t));
-  memset (region_vertical_address, 0, MAX_REGIONS * sizeof (uint16_t));
-
   pid = state->pid;
-
+  buf = segment[pid].buffer;
   fprintf (fo, "\n  Page Composition Segment (PCS)\n");
 
-  // Sync Byte (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
+  // Segment header: Sync Byte, Segment Type, Page ID, Segment Length.
+  if (!bytes_available (*offset, 6, segment[pid].length)) {
+    fprintf (stderr, "Truncated PCS header.\n");
+    return (EXIT_FAILURE);
   }
-  sync_byte = segment[pid].buffer[*offset];
-  if (sync_byte != 0x0f) {
-    fprintf (stderr, "Sync byte not found in parse_pcs().\n");
-    fprintf (stderr, "Found: 0x%02x\n", sync_byte);
-    exit (EXIT_FAILURE);
+  if (buf[*offset] != 0x0f || buf[*offset + 1] != 0x10) {
+    fprintf (stderr, "Invalid PCS sync byte or segment type.\n");
+    return (EXIT_FAILURE);
   }
-  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", sync_byte);
-  (*offset)++;
 
-  // Segment Type (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  segment_type = segment[pid].buffer[*offset];
-  if (segment_type != 0x10) {
-    fprintf (stderr, "Wrong Segment Type found in parse_pcs().\n");
-    fprintf (stderr, "Found: 0x%02x\n", segment_type);
-    exit (EXIT_FAILURE);
-  }
-  segment_types (state, segment_type, fo);
-  (*offset)++;
+  // Sync Byte (1 byte) and Segment Type (1 byte).
+  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", buf[*offset]);
+  segment_types (state, buf[*offset + 1], fo);
 
-  // Page ID (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  page_id = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-  state->page_id = page_id;
+  // Page ID (2 bytes) and Segment Length (2 bytes).
+  page_id = (uint16_t) (((uint16_t) buf[*offset + 2] << 8) | buf[*offset + 3]);
+  body_len = (size_t) (((uint16_t) buf[*offset + 4] << 8) | buf[*offset + 5]);
   fprintf (fo, "    Page ID (2 bytes): 0x%04x\n", page_id);
-  (*offset) += 2;
+  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", body_len);
+  state->page_id = page_id;
+  *offset += 6;
 
-  // Allocate memory for this page_id if not already available.
+  if (!bytes_available (*offset, body_len, segment[pid].length) || body_len < 2) {
+    fprintf (stderr, "Invalid or truncated PCS body.\n");
+    return (EXIT_FAILURE);
+  }
+  end = *offset + body_len;
+
+  // The fixed PCS body is two bytes. Each displayed region then contributes
+  // exactly six bytes: region_id, reserved, horizontal address, vertical
+  // address.
+  if ((body_len - 2) % 6 != 0) {
+    fprintf (stderr, "PCS region-position loop has an invalid length.\n");
+    return (EXIT_FAILURE);
+  }
+  nregions = (body_len - 2) / 6;
+  if (nregions > MAX_REGIONS) {
+    fprintf (stderr, "PCS contains %zu regions; maximum supported is %d.\n",
+             nregions, MAX_REGIONS);
+    return (EXIT_FAILURE);
+  }
+
+  // Allocate memory for this page_id if it has not been encountered before.
+  // Page IDs are identifiers and need not correspond to PAGE array indexes.
   temp = find_page_index (state, *page, page_id);
-  if ((temp) < 0) {
-    old_size = state->npages;
-    page_idx = state->npages;  // Note it's a 0-based array.
-    tmp = (PAGE *) realloc (*page, (old_size + 1) * sizeof (PAGE));
-    if (tmp != NULL) {
-      (*page) = tmp;
-    } else {
-      fprintf (stderr, "Cannot allocate memory for page[%zu] in parse_pcs().\n", page_idx);
-      fprintf (stderr, "page_id: 0x%04x\n", page_id);
-      exit (EXIT_FAILURE);
+  if (temp < 0) {
+    page_idx = state->npages;
+    if (page_idx == SIZE_MAX / sizeof (**page)) {
+      return (EXIT_FAILURE);
     }
-    memset (&(*page)[old_size], 0, sizeof (PAGE));  // Clear only new elements.
+    tmp = realloc (*page, (page_idx + 1) * sizeof (**page));
+    if (!tmp) {
+      fprintf (stderr, "Cannot allocate page %zu.\n", page_idx);
+      return (EXIT_FAILURE);
+    }
+    *page = tmp;
+    memset (&(*page)[page_idx], 0, sizeof (**page));
     (*page)[page_idx].page_id = page_id;
-    (*page)[page_idx].version = 0;
-    (*page)[page_idx].complete = 0;
-    (*page)[page_idx].nregion_pos = 0;  // Number of region positions defined for page[page_id] by parse_pcs(); these are the regions to be displayed.
-    (*page)[page_idx].region_pos = NULL;  // We will allocate region positions dynamically as needed.
-    (*page)[page_idx].nregions = 0;  // Number of regions defined for page[page_id] by parse_rcs(); none, some, or all of these may be displayed.
-    (*page)[page_idx].region = NULL;  // We will allocate regions dynamically as needed.
-    (*page)[page_idx].nobjects = 0;
-    (*page)[page_idx].object = NULL;  // We will allocate objects and their image buffers dynamically as needed. See parse_ods().
-    (*page)[page_idx].ncluts = 0;
-    (*page)[page_idx].clut = NULL;  // We will allocate CLUT families dynamically as needed.
-    (*page)[page_idx].buffer = allocate_u8mem (IMG_BUFFER_SIZE);  // Buffer for final page composition as RGBA.
+    (*page)[page_idx].buffer = allocate_u8mem (IMG_BUFFER_SIZE);
     state->npages++;
-
-  // Page already has memory allocated for it.
   } else {
     page_idx = (size_t) temp;
   }
+  pg = &(*page)[page_idx];
 
-  // If page_id is complete, then render it; we're starting a new Display Set now.
-  if ((*page)[page_idx].complete) {
+  // An END segment marks the preceding display set complete. Seeing the next
+  // PCS for this same page therefore finalizes the previous display set first.
+  if (pg->complete) {
     finalize_page_if_needed (state, *page, page_idx, pes);
   }
 
-  // The latest PTS is the start timestamp of a new Display Set.
-  (*page)[page_idx].start = pes->pts;
+  // The PTS belonging to this PCS is the start timestamp of the new Display
+  // Set for this page.
+  pg->start = pes->pts;
 
-  // Segment Length (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  segment_length = (size_t) ((segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1]);
-  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", segment_length);
-  (*offset) += 2;
-  consumed = 0;
-
-  // Page Time-Out (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-  page_time_out = segment[pid].buffer[*offset];
-  (*page)[page_idx].time_out = page_time_out;
-  fprintf (fo, "    Page Time-Out (1 byte): %u seconds\n", page_time_out);
+  // Page Time-Out (1 byte), Page Version Number (4 bits), Page State (2 bits),
+  // followed by 2 reserved bits.
+  pg->time_out = buf[(*offset)++];
+  pg->version = (buf[*offset] >> 4) & 0x0f;
+  page_state = (buf[*offset] >> 2) & 3;
   (*offset)++;
-  consumed++;
 
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  // Page Version Number (4 bits)
-  page_version_number = (segment[pid].buffer[*offset] >> 4) & 0x0f;  // 0x0f = 1111
-  (*page)[page_idx].version = page_version_number;
-  fprintf (fo, "    Page Version Number (4 bits): 0x%01x\n", page_version_number);
-
-  // Page State (2 bits)
-  page_state = (segment[pid].buffer[*offset] >> 2) & 0x03;  // 0x03 = 0000 0011
+  fprintf (fo, "    Page Time-Out (1 byte): %u seconds\n", pg->time_out);
+  fprintf (fo, "    Page Version Number (4 bits): 0x%01x\n", pg->version);
   switch (page_state) {
 
-    case 0x00:  // Normal Case
-      fprintf (fo, "    Page State (2 bits): 0x%01x Normal Case\n", page_state);
+    case 0:
+      fprintf (fo, "    Page State (2 bits): 0x0 Normal Case\n");
       break;
 
-    case 0x01:  // Acquisition Point
-      fprintf (fo, "    Page State (2 bits): 0x%01x Acquisition Point\n", page_state);
+    case 1:
+      fprintf (fo, "    Page State (2 bits): 0x1 Acquisition Point\n");
       break;
 
-    case 0x02:  // Mode Change
-      fprintf (fo, "    Page State (2 bits): 0x%01x Mode Change\n", page_state);
-      break;
-
-    case 0x03:  // Reserved
-      fprintf (fo, "    Page State (2 bits): 0x%01x Reserved for future use\n", page_state);
+    case 2:
+      fprintf (fo, "    Page State (2 bits): 0x2 Mode Change\n");
       break;
 
     default:
-      fprintf (stderr, "Unknown Page State in parse_pcs(): 0x%01x\n", page_state);
-      exit (EXIT_FAILURE);
-
-  }  // End switch page_state
-
-  // Reserved (2 bits)
-
-  (*offset)++;
-  consumed++;
-
-  // Region Address Loop
-  // Only these regions will be displayed, although more regions may be defined by parse_rcs().
-  nregion_pos = 0;
-  while ((consumed < segment_length) && ((*offset) < segment[pid].length)) {
-
-    // Region ID (1 byte)
-    if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    region_id[nregion_pos] = segment[pid].buffer[*offset];
-    (*offset)++;
-    consumed++;
-
-    // Reserved (1 byte)
-    if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    (*offset)++;
-    consumed++;
-
-    // Region Horizontal Address (px from left of page) (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    region_horizontal_address[nregion_pos] = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-    (*offset) += 2;
-    consumed += 2;
-
-    // Region Vertical Address (px from top of page) (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_pcs().\n");
-      exit (EXIT_FAILURE);
-    }
-    region_vertical_address[nregion_pos] = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-    (*offset) += 2;
-    consumed += 2;
-
-    fprintf (fo, "    Region ID (1 byte): 0x%02x\n", region_id[nregion_pos]);
-    fprintf (fo, "      Region Horizontal Address (2 bytes): %u px from left of page\n", region_horizontal_address[nregion_pos]);
-    fprintf (fo, "      Region Vertical Address (2 bytes): %u px from top of page\n", region_vertical_address[nregion_pos]);
-
-    // Increment count of regions for this page.
-    nregion_pos++;
-
-  }  // End while
-
-  // Allocate memory for region positions if not already available.
-  if (((*page)[page_idx].nregion_pos < nregion_pos) || ((*page)[page_idx].region_pos == NULL)) {
-
-    old_size = (*page)[page_idx].nregion_pos;
-    (*page)[page_idx].nregion_pos = nregion_pos;
-    if (nregion_pos > old_size) {
-
-      // Region positions
-      tmp = (REGION_POS *) realloc ((*page)[page_idx].region_pos, nregion_pos * sizeof (REGION_POS));
-      if (tmp != NULL) {
-        (*page)[page_idx].region_pos = tmp;
-      } else {
-        fprintf (stderr, "Cannot allocate memory for page[%zu].region_pos array in parse_pcs().\n", page_idx);
-        fprintf (stderr, "page_id: 0x%04x, nregion_pos: %zu\n", page_id, nregion_pos);
-        exit (EXIT_FAILURE);
-      }
-    }
-
-    // Initialize only the newly allocated memory.
-    new_elements = nregion_pos - old_size;
-    if (new_elements > 0) {
-      memset (&(*page)[page_idx].region_pos[old_size], 0, new_elements * sizeof (REGION_POS));
-    }
+      fprintf (fo, "    Page State (2 bits): 0x3 Reserved\n");
+      break;
   }
 
-  // Store region_id's and region positions for this page.
-  // Only these regions will be displayed, although more regions may be defined by parse_rcs().
-  (*page)[page_idx].nregion_pos = nregion_pos;
-  for (i = 0; i < nregion_pos; i++) {
-    (*page)[page_idx].region_pos[i].region_id = region_id[i];
-    (*page)[page_idx].region_pos[i].region_horizontal_address = region_horizontal_address[i];
-    (*page)[page_idx].region_pos[i].region_vertical_address = region_vertical_address[i];
+  // A PCS may intentionally display no regions. In that case clear any
+  // region positions retained from the preceding version of this page.
+  if (nregions == 0) {
+    free (pg->region_pos);
+    pg->region_pos = NULL;
+    pg->nregion_pos = 0;
+    return (*offset == end ? EXIT_SUCCESS : EXIT_FAILURE);
   }
 
-  return (EXIT_SUCCESS);
+  // Allocate exactly enough region-position entries for this PCS. Only these
+  // regions are displayed, although RCS segments may define additional
+  // regions for the same page.
+  tmp = realloc (pg->region_pos, nregions * sizeof (*pg->region_pos));
+  if (!tmp) {
+    fprintf (stderr, "Cannot allocate PCS region positions.\n");
+    return (EXIT_FAILURE);
+  }
+  pg->region_pos = tmp;
+  pg->nregion_pos = nregions;
+
+  // Region Address Loop.
+  for (i = 0; i < nregions; i++) {
+    REGION_POS *rp = &pg->region_pos[i];
+
+    // Region ID (1 byte).
+    rp->region_id = buf[(*offset)++];
+
+    // Reserved (1 byte).
+    (*offset)++;
+
+    // Region Horizontal Address (2 bytes): pixels from the left of the page.
+    rp->region_horizontal_address = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+    *offset += 2;
+
+    // Region Vertical Address (2 bytes): pixels from the top of the page.
+    rp->region_vertical_address = (uint16_t) (((uint16_t) buf[*offset] << 8) | buf[*offset + 1]);
+    *offset += 2;
+
+    fprintf (fo, "    Region ID (1 byte): 0x%02x\n", rp->region_id);
+    fprintf (fo, "      Region Horizontal Address: %u px\n", rp->region_horizontal_address);
+    fprintf (fo, "      Region Vertical Address: %u px\n", rp->region_vertical_address);
+  }
+
+  return (*offset == end ? EXIT_SUCCESS : EXIT_FAILURE);
 }

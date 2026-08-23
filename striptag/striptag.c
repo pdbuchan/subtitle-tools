@@ -1,4 +1,4 @@
-/*  Copyright (C) 2024-2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2024-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -17,63 +17,73 @@
 // striptag.c - Read an existing SubRip (srt) file and remove markup tags.
 //              Tags included: italics, bold, underline, strikethrough, font color, font size, position
 
-// gcc -Wall striptag.c -o striptag
+// gcc -std=c11 -Wall -Wextra -Wpedantic striptag.c -o striptag
 
 // Run without command line arguments to see usage notes.
 // Output: out.srt
 
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
-#include <stdlib.h> 
-#include <inttypes.h>  // uint8_t
+#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 // Definition of structs
 typedef struct {
   int len;
-  char *name;
-  uint8_t *sequence;
+  const char *name;
+  const uint8_t *sequence;
 } BOM;
 
 // Function prototypes
 int readline (FILE *, char *, int);
-int byteordermark (char *, BOM *);
+int byteordermark (const char *, const BOM *);
 int searchandremove (char *, const char *);
-int counttags (char *, const char *);
+static char *ifind_case_insensitive (char *, const char *);
+static int starts_case_insensitive (const char *, const char *);
+static int write_line (FILE *, const char *);
 char *allocate_strmem (int);
 char **allocate_strmemp (int);
-int *allocate_intmem (int);
-BOM *allocate_bommem (int);
 
 // Set some symbolic constants.
-#define MAXLEN 1024  // Maximum number of characters per line
-#define MAXLINES 10  // Maximum number of lines of text per subtitle
+#define MAXLEN 1024  // Maximum number of characters per physical line
 #define MAXBOM 11  // Maximum number of Byte Order Mark (BOM) types
 
 int
 main (int argc, char **argv) {
 
-  int i, type, alllines, index, nlines, line, nsubs, sub;
+  int type, alllines, nlines, line, nsubs, sub, status, output_ok;
   int removeital, removebold, removeunderline, removestrikeout, removefont, removepos;
-  char *temp, *filename, **input, **text, *alltext;
-  BOM *bom;
+  char *temp, **input;
+  const char *filename;
   FILE *fi, *fo;
 
   // Byte Order Mark (BOM) names and sequences.
-  char name[MAXBOM][30] = {"UTF-8", "UTF-16 (BE)", "UTF-16 (LE)", "UTF-32 (BE)", "UTF-32 (LE)", "UTF-7", "UTF-1", "UTF-EBCDIC", "SCSU", "BOCU-1", "GB18030"};
-  uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
-  uint8_t utf16be[2]    = {0xfe, 0xff};
-  uint8_t utf16le[2]    = {0xff, 0xfe};
-  uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
-  uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
-  uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
-  uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
-  uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
-  uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
-  uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
-  uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
-
-  // Allocate memory for various arrays.
-  filename = allocate_strmem (MAXLEN);
+  static const uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
+  static const uint8_t utf16be[2]    = {0xfe, 0xff};
+  static const uint8_t utf16le[2]    = {0xff, 0xfe};
+  static const uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
+  static const uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
+  static const uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
+  static const uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
+  static const uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
+  static const uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
+  static const uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
+  static const uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
+  static const BOM bom[MAXBOM] = {
+    {3, "UTF-8", utf8},
+    {2, "UTF-16 (BE)", utf16be},
+    {2, "UTF-16 (LE)", utf16le},
+    {4, "UTF-32 (BE)", utf32be},
+    {4, "UTF-32 (LE)", utf32le},
+    {3, "UTF-7", utf7},
+    {3, "UTF-1", utf1},
+    {4, "UTF-EBCDIC", utfebcdic},
+    {3, "SCSU", scsu},
+    {3, "BOCU-1", bocu1},
+    {4, "GB18030", gb18030}
+  };
 
   // Set tag removal flags all to zero.
   removeital = 0;
@@ -84,78 +94,52 @@ main (int argc, char **argv) {
   removepos = 0;
 
   // Process the command line arguments, if any.
-  if (argc == 2) {
-    strncpy (filename, argv[1], MAXLEN);
+  if ((argc == 2) || (argc == 3)) {
+    filename = argv[1];
 
-  } else if ((argc == 3) && (strncmp (argv[2], "a", 1) == 0)) {
-    strncpy (filename, argv[1], MAXLEN);
-    removeital = 1;
-    removebold = 1;
-    removeunderline = 1;
-    removestrikeout = 1;
-    removefont = 1;
-    removepos = 1;
-
-  } else if ((argc == 3) && (strncmp (argv[2], "i", 1) == 0)) {
-    strncpy (filename, argv[1], MAXLEN);
-    removeital = 1;
-
-  } else if ((argc == 3) && (strncmp (argv[2], "b", 1) == 0)) {
-    strncpy (filename, argv[1], MAXLEN);
-    removebold = 1;
-
-  } else if ((argc == 3) && (strncmp (argv[2], "u", 1) == 0)) {
-    strncpy (filename, argv[1], MAXLEN);
-    removeunderline = 1;
-
-  } else if ((argc == 3) && (strncmp (argv[2], "s", 1) == 0)) {
-    strncpy (filename, argv[1], MAXLEN);
-    removestrikeout = 1;
-
-  } else if ((argc == 3) && (strncmp (argv[2], "f", 1) == 0)) {
-    strncpy (filename, argv[1], MAXLEN);
-    removefont = 1;
-
-  } else if ((argc == 3) && (strncmp (argv[2], "p", 1) == 0)) {
-    strncpy (filename, argv[1], MAXLEN);
-    removepos = 1;
-
+    if (argc == 3) {
+      if (strcmp (argv[2], "a") == 0) {
+        removeital = 1;
+        removebold = 1;
+        removeunderline = 1;
+        removestrikeout = 1;
+        removefont = 1;
+        removepos = 1;
+      } else if (strcmp (argv[2], "i") == 0) {
+        removeital = 1;
+      } else if (strcmp (argv[2], "b") == 0) {
+        removebold = 1;
+      } else if (strcmp (argv[2], "u") == 0) {
+        removeunderline = 1;
+      } else if (strcmp (argv[2], "s") == 0) {
+        removestrikeout = 1;
+      } else if (strcmp (argv[2], "f") == 0) {
+        removefont = 1;
+      } else if (strcmp (argv[2], "p") == 0) {
+        removepos = 1;
+      } else {
+        argc = 0;  // Force usage message below.
+      }
+    }
   } else {
+    filename = NULL;
+  }
+
+  if ((argc != 2) && (argc != 3)) {
     fprintf (stdout, "\nUsage: ./striptag inputfilename.srt [option]\n\n");
     fprintf (stdout, "Options:\n");
     fprintf (stdout, "          a - remove all markup tags\n");
     fprintf (stdout, "          i - remove italics tags\n");
     fprintf (stdout, "          b - remove bold tags\n");
-    fprintf (stdout, "          u - remove unterline tags\n");
+    fprintf (stdout, "          u - remove underline tags\n");
     fprintf (stdout, "          s - remove strikeout tags\n");
     fprintf (stdout, "          f - remove font color and font size tags\n");
     fprintf (stdout, "          p - remove position tags\n\n");
     fprintf (stdout, "Output filename will be out.srt.\n\n");
-    free (filename);
     return (EXIT_SUCCESS);
   }
 
-  // Allocate memory for various arrays.
   temp = allocate_strmem (MAXLEN);
-  bom = allocate_bommem (MAXBOM);
-  text = allocate_strmemp (MAXLINES);
-  for (i=0; i<MAXLINES; i++) {
-    text[i] = allocate_strmem (MAXLEN); 
-  }   
-  alltext = allocate_strmem (MAXLEN * MAXLINES);
-
-  // Populate array with Byte Order Mark data.
-  bom[0].len = 3;    bom[0].name = name[0];    bom[0].sequence = utf8;
-  bom[1].len = 2;    bom[1].name = name[1];    bom[1].sequence = utf16be;
-  bom[2].len = 2;    bom[2].name = name[2];    bom[2].sequence = utf16le;
-  bom[3].len = 4;    bom[3].name = name[3];    bom[3].sequence = utf32be;
-  bom[4].len = 4;    bom[4].name = name[4];    bom[4].sequence = utf32le;
-  bom[5].len = 3;    bom[5].name = name[5];    bom[5].sequence = utf7;
-  bom[6].len = 3;    bom[6].name = name[6];    bom[6].sequence = utf1;
-  bom[7].len = 4;    bom[7].name = name[7];    bom[7].sequence = utfebcdic;
-  bom[8].len = 3;    bom[8].name = name[8];    bom[8].sequence = scsu;
-  bom[9].len = 3;    bom[9].name = name[9];    bom[9].sequence = bocu1;
-  bom[10].len = 4;   bom[10].name = name[10];  bom[10].sequence = gb18030;
 
   fprintf (stdout, "\nInput file: %s\n", filename);
 
@@ -163,50 +147,98 @@ main (int argc, char **argv) {
   fi = fopen (filename, "r");
   if (fi == NULL) {
     fprintf (stderr, "\nERROR: Unable to open input SubRip file %s.\n", filename);
-    exit (EXIT_FAILURE);
+    free (temp);
+    return (EXIT_FAILURE);
   }
 
   // Count lines of input SubRip file.
-  alllines = 0;  // Count of lines
-  while (readline (fi, temp, MAXLEN) != -1) {
+  alllines = 0;
+  for (;;) {
+    status = readline (fi, temp, MAXLEN);
+    if (status == -1) break;
+    if (status == -2) {
+      fprintf (stderr, "\nERROR: Line %i does not fit in the %i-byte input buffer.\n", alllines + 1, MAXLEN);
+      fclose (fi);
+      free (temp);
+      return (EXIT_FAILURE);
+    }
+    if (status == -3) {
+      fprintf (stderr, "\nERROR: Unable to read input SubRip file %s.\n", filename);
+      fclose (fi);
+      free (temp);
+      return (EXIT_FAILURE);
+    }
     alllines++;
   }
+
   fprintf (stdout, "\n%i lines found including any excess trailing line-feeds.\n", alllines);
+
+  if (alllines == 0) {
+    fprintf (stderr, "ERROR: Input SubRip file %s is empty.\n", filename);
+    fclose (fi);
+    free (temp);
+    return (EXIT_FAILURE);
+  }
+
   rewind (fi);
 
-  // Allocate memory for array to hold input file.
-  input = allocate_strmemp (alllines + 1);  // Add 1 in case we need to replace a missing line-feed at end.
+  // Add one slot in case a missing final blank line must be supplied.
+  input = allocate_strmemp (alllines + 1);
   for (line=0; line<(alllines + 1); line++) {
     input[line] = allocate_strmem (MAXLEN);
   }
 
   // Read input SubRip file into array input.
   for (line=0; line<alllines; line++) {
-    if (readline (fi, input[line], MAXLEN) == -1) {
-      fprintf (stderr, "\nERROR: Cannot read line %i from input SubRip file %s.\n", line + 1, filename);
-      exit (EXIT_FAILURE);
+    status = readline (fi, input[line], MAXLEN);
+    if (status == -1) {
+      fprintf (stderr, "\nERROR: Unexpected EOF while reading line %i from %s.\n", line + 1, filename);
+      fclose (fi);
+      free (temp);
+      for (line=0; line<(alllines + 1); line++) free (input[line]);
+      free (input);
+      return (EXIT_FAILURE);
     }
-  }  // Next line
-
-  // Close input file.
-  fclose (fi);
-
-  // Remove excess line-feeds at end of array input.
-  nlines = alllines;
-  for (line=alllines; line>1; line--) {
-    if ((input[line - 1][0] == '\n') && (input[line - 2][0] == '\n')) {
-      nlines--;
-    } else {
-      break;
+    if (status == -2) {
+      fprintf (stderr, "\nERROR: Line %i does not fit in the %i-byte input buffer.\n", line + 1, MAXLEN);
+      fclose (fi);
+      free (temp);
+      for (line=0; line<(alllines + 1); line++) free (input[line]);
+      free (input);
+      return (EXIT_FAILURE);
+    }
+    if (status == -3) {
+      fprintf (stderr, "\nERROR: Unable to read line %i from input SubRip file %s.\n", line + 1, filename);
+      fclose (fi);
+      free (temp);
+      for (line=0; line<(alllines + 1); line++) free (input[line]);
+      free (input);
+      return (EXIT_FAILURE);
     }
   }
 
-  // Check for final line-feed which closes last subtitle.
-  // Add one if missing.
+  if (fclose (fi) != 0) {
+    fprintf (stderr, "ERROR: Unable to close input SubRip file %s.\n", filename);
+    free (temp);
+    for (line=0; line<(alllines + 1); line++) free (input[line]);
+    free (input);
+    return (EXIT_FAILURE);
+  }
+
+  free (temp);
+
+  // Remove excess blank lines at end while retaining one final separator.
+  nlines = alllines;
+  while ((nlines > 1) && (input[nlines - 1][0] == '\n') && (input[nlines - 2][0] == '\n')) {
+    nlines--;
+  }
+
+  // Add a missing final blank line so the last subtitle is safely terminated.
   if (input[nlines - 1][0] != '\n') {
+    input[nlines][0] = '\n';
+    input[nlines][1] = '\0';
     nlines++;
-    input[nlines - 1][0] = '\n';
-    fprintf (stdout, "WARNING: Final closing line-feed for last subtitle was missing but was corrected.\n");
+    fprintf (stdout, "WARNING: Final blank line after the last subtitle was missing but was corrected.\n");
   } else {
     fprintf (stdout, "%i lines found excluding excess trailing line-feeds.\n", nlines);
   }
@@ -216,349 +248,452 @@ main (int argc, char **argv) {
   if (type < 0) {
     fprintf (stdout, "\nNo known Byte Order Mark (BOM) found in %s.\n", filename);
   } else {
-    fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
-  }
+    fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n",
+             bom[type].name);
 
-  // Count number of subtitles in SubRip file; assume at least one.
-  nsubs = 0;
-  for (line=0; line<nlines; line++) {
-
-    nsubs++;
-
-    // Advance through to next subtitle number, if there is one.
-    // End of current subtitle is demarcated by a line containing only a line-feed.
-    while (input[line][0] != '\n') {
-      line++;
-      if (line == nlines) break;
+    // This parser is byte-oriented. UTF-8 is compatible after removing its BOM,
+    // but the other BOM-marked encodings require decoding first.
+    if (type != 0) {
+      fprintf (stderr, "ERROR: %s input is not supported by this byte-oriented SubRip parser.\n", bom[type].name);
+      fprintf (stderr, "       Convert the file to UTF-8 first.\n");
+      for (line=0; line<(alllines + 1); line++) free (input[line]);
+      free (input);
+      return (EXIT_FAILURE);
     }
 
-  }  // Next sub
+    // Remove UTF-8 BOM from the first logical line before parsing. It will be
+    // written explicitly to the output file later.
+    memmove (input[0], &input[0][bom[0].len], strlen (&input[0][bom[0].len]) + 1u);
+  }
+
+  // Validate subtitle structure and count subtitles.
+  nsubs = 0;
+  line = 0;
+  while (line < nlines) {
+    if (input[line][0] == '\n') {
+      fprintf (stderr, "ERROR: Unexpected blank line at input line %i.\n", line + 1);
+      for (line=0; line<(alllines + 1); line++) free (input[line]);
+      free (input);
+      return (EXIT_FAILURE);
+    }
+
+    // Subtitle number line.
+    line++;
+
+    // Timestamp line must exist and may not be blank.
+    if ((line >= nlines) || (input[line][0] == '\n')) {
+      fprintf (stderr, "ERROR: Subtitle %i is missing its timestamp line.\n", nsubs + 1);
+      for (line=0; line<(alllines + 1); line++) free (input[line]);
+      free (input);
+      return (EXIT_FAILURE);
+    }
+    line++;
+
+    // Subtitle text may contain zero or more lines.
+    while ((line < nlines) && (input[line][0] != '\n')) line++;
+
+    if (line >= nlines) {
+      fprintf (stderr, "ERROR: Subtitle %i is not closed by a blank line.\n", nsubs + 1);
+      for (line=0; line<(alllines + 1); line++) free (input[line]);
+      free (input);
+      return (EXIT_FAILURE);
+    }
+
+    line++;  // Skip blank separator.
+    nsubs++;
+  }
+
   fprintf (stdout, "\n%i subtitles found.\n\n", nsubs);
 
-  // Replace all line-feeds with string termination.
-  for (line=0; line<nlines; line++) {
-    input[line][strnlen (input[line], MAXLEN) - 1] = 0;
-  }
-
-  // Open output file.
-  fo = fopen ("out.srt", "r");
-  if (fo != NULL) {
-    fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
-    exit (EXIT_FAILURE);
-  }
-  fo = fopen ("out.srt", "w");
+  // Open output file without overwriting an existing file.
+  errno = 0;
+  fo = fopen ("out.srt", "wx");
   if (fo == NULL) {
-    fprintf (stderr, "ERROR: Unable to open output file out.srt.\n");
-    exit (EXIT_FAILURE);
+    if (errno == EEXIST) {
+      fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
+    } else {
+      fprintf (stderr, "ERROR: Unable to create output file out.srt.\n");
+    }
+    for (line=0; line<(alllines + 1); line++) free (input[line]);
+    free (input);
+    return (EXIT_FAILURE);
   }
 
-  // Write Byte Order Mark (BOM) to output file if detected in input file.
-  if (type != -1) {
-    fwrite (bom[type].sequence, bom[type].len * sizeof (uint8_t), 1, fo);
+  output_ok = 1;
+
+  // Preserve a UTF-8 BOM when one was present in the input file.
+  if (type == 0) {
+    if (fwrite (bom[0].sequence, sizeof (uint8_t), (size_t) bom[0].len, fo) !=
+        (size_t) bom[0].len) {
+      output_ok = 0;
+    }
   }
 
   // Loop through all subtitles.
-  index = 0;  // Line index of input file.
-  for (sub=0; sub<nsubs; sub++) {
+  line = 0;
+  for (sub=0; (sub<nsubs) && output_ok; sub++) {
 
-    // Write subtitle number to output file.
-    fprintf (fo, "%i\n", sub + 1);
-    index++;
-
-    // Write line containing start and end times to output file.
-    fprintf (fo, "%s\n", input[index]);
-    index++;
-
-    // Clear all text from text array.
-    for (i=0; i<MAXLINES; i++) {
-      memset (text[i], 0, MAXLEN * sizeof (char));
+    // Renumber subtitles.
+    if (fprintf (fo, "%i\n", sub + 1) < 0) {
+      output_ok = 0;
+      break;
     }
+    line++;  // Ignore original subtitle number.
 
-    // Extract text lines for current subtitle.
-    // End of current subtitle is demarcated by a line containing only a line-feed.
-    nlines = 0;  // Count of number of lines of text.
-    while (input[index][0] != 0) {
-      sprintf (text[nlines], "%s", input[index]);
-      nlines++;
-      index++;
+    // Copy timestamp line.
+    if (write_line (fo, input[line]) != EXIT_SUCCESS) {
+      output_ok = 0;
+      break;
     }
+    line++;
 
-    // Move to next subtitle.
-    index++;
-
-    // Clear buffer used to contain all lines of text for this subtitle.
-    memset (alltext, 0, MAXLEN * MAXLINES * sizeof (char));
-
-    // Loop through all lines of text of current subtitle.
-    // Search for and remove markup tags.
-    for (line=0; line<nlines; line++) {
+    // Process and write all text lines of current subtitle.
+    while ((line < nlines) && (input[line][0] != '\n')) {
 
       // Italics
       if (removeital) {
-        searchandremove (text[line], "< i>");
-        searchandremove (text[line], "<i >");
-        searchandremove (text[line], "< i >");
-        searchandremove (text[line], "<i>");
-
-        searchandremove (text[line], "</ i>");
-        searchandremove (text[line], "</i >");
-        searchandremove (text[line], "< /i>");
-        searchandremove (text[line], "< / i>");
-        searchandremove (text[line], "< / i >");
-        searchandremove (text[line], "</i>");
+        searchandremove (input[line], "< i>");
+        searchandremove (input[line], "<i >");
+        searchandremove (input[line], "< i >");
+        searchandremove (input[line], "<i>");
+        searchandremove (input[line], "</ i>");
+        searchandremove (input[line], "</i >");
+        searchandremove (input[line], "< /i>");
+        searchandremove (input[line], "< / i>");
+        searchandremove (input[line], "< / i >");
+        searchandremove (input[line], "</i>");
       }
 
       // Bold
       if (removebold) {
-        searchandremove (text[line], "< b>");
-        searchandremove (text[line], "<b >");
-        searchandremove (text[line], "< b >");
-        searchandremove (text[line], "<b>");
-
-        searchandremove (text[line], "</ b>");
-        searchandremove (text[line], "</b >");
-        searchandremove (text[line], "< /b>");
-        searchandremove (text[line], "< / b>");
-        searchandremove (text[line], "< / b >");
-        searchandremove (text[line], "</b>");
+        searchandremove (input[line], "< b>");
+        searchandremove (input[line], "<b >");
+        searchandremove (input[line], "< b >");
+        searchandremove (input[line], "<b>");
+        searchandremove (input[line], "</ b>");
+        searchandremove (input[line], "</b >");
+        searchandremove (input[line], "< /b>");
+        searchandremove (input[line], "< / b>");
+        searchandremove (input[line], "< / b >");
+        searchandremove (input[line], "</b>");
       }
 
       // Underline
       if (removeunderline) {
-        searchandremove (text[line], "< u>");
-        searchandremove (text[line], "<u >");
-        searchandremove (text[line], "< u >");
-        searchandremove (text[line], "<u>");
-
-        searchandremove (text[line], "</ u>");
-        searchandremove (text[line], "</u >");
-        searchandremove (text[line], "< /u>");
-        searchandremove (text[line], "< / u>");
-        searchandremove (text[line], "< / u >");
-        searchandremove (text[line], "</u>");
+        searchandremove (input[line], "< u>");
+        searchandremove (input[line], "<u >");
+        searchandremove (input[line], "< u >");
+        searchandremove (input[line], "<u>");
+        searchandremove (input[line], "</ u>");
+        searchandremove (input[line], "</u >");
+        searchandremove (input[line], "< /u>");
+        searchandremove (input[line], "< / u>");
+        searchandremove (input[line], "< / u >");
+        searchandremove (input[line], "</u>");
       }
 
       // Strikeout
       if (removestrikeout) {
-        searchandremove (text[line], "< s>");
-        searchandremove (text[line], "<s >");
-        searchandremove (text[line], "< s >");
-        searchandremove (text[line], "<s>");
-
-        searchandremove (text[line], "</ s>");
-        searchandremove (text[line], "</s >");
-        searchandremove (text[line], "< /s>");
-        searchandremove (text[line], "< / s>");
-        searchandremove (text[line], "< / s >");
-        searchandremove (text[line], "</s>");
+        searchandremove (input[line], "< s>");
+        searchandremove (input[line], "<s >");
+        searchandremove (input[line], "< s >");
+        searchandremove (input[line], "<s>");
+        searchandremove (input[line], "</ s>");
+        searchandremove (input[line], "</s >");
+        searchandremove (input[line], "< /s>");
+        searchandremove (input[line], "< / s>");
+        searchandremove (input[line], "< / s >");
+        searchandremove (input[line], "</s>");
       }
 
       // Font color and size
       if (removefont) {
+        searchandremove (input[line], "< font color=");
+        searchandremove (input[line], "<font color =");
+        searchandremove (input[line], "<font color= ");
+        searchandremove (input[line], "<font color = ");
+        searchandremove (input[line], "< font color = ");
+        searchandremove (input[line], "<fontcolor=");
+        searchandremove (input[line], "<font color=");
 
-        // Font color
-        searchandremove (text[line], "< font color=");
-        searchandremove (text[line], "<font color =");
-        searchandremove (text[line], "<font color= ");
-        searchandremove (text[line], "<font color = ");
-        searchandremove (text[line], "< font color = ");
-        searchandremove (text[line], "<fontcolor=");
-        searchandremove (text[line], "<font color=");
+        searchandremove (input[line], "< font size=");
+        searchandremove (input[line], "<font size =");
+        searchandremove (input[line], "<font size= ");
+        searchandremove (input[line], "<font size = ");
+        searchandremove (input[line], "< font size = ");
+        searchandremove (input[line], "<fontsize=");
+        searchandremove (input[line], "<font size=");
 
-        // Font size
-        searchandremove (text[line], "< font size=");
-        searchandremove (text[line], "<font size =");
-        searchandremove (text[line], "<font size= ");
-        searchandremove (text[line], "<font size = ");
-        searchandremove (text[line], "< font size = ");
-        searchandremove (text[line], "<fontsize=");
-        searchandremove (text[line], "<font size=");
-
-        // Closing font
-        searchandremove (text[line], "</ font>");
-        searchandremove (text[line], "</font >");
-        searchandremove (text[line], "< /font>");
-        searchandremove (text[line], "< /font >");
-        searchandremove (text[line], "</font>");
+        searchandremove (input[line], "</ font>");
+        searchandremove (input[line], "</font >");
+        searchandremove (input[line], "< /font>");
+        searchandremove (input[line], "< /font >");
+        searchandremove (input[line], "</font>");
       }
 
       // Position
       if (removepos) {
-        searchandremove (text[line], "{ \\an");
-        searchandremove (text[line], "{\\ an");
-        searchandremove (text[line], "{\\an ");
-        searchandremove (text[line], "{ \\ an");
-        searchandremove (text[line], "{\\an");
+        searchandremove (input[line], "{ \\an");
+        searchandremove (input[line], "{\\ an");
+        searchandremove (input[line], "{\\an ");
+        searchandremove (input[line], "{ \\ an");
+        searchandremove (input[line], "{\\an");
       }
 
-      // Add lines to buffer alltext.
-      strncat (alltext, text[line], MAXLEN);
-      strcat (alltext, "\n");
+      if (write_line (fo, input[line]) != EXIT_SUCCESS) {
+        output_ok = 0;
+        break;
+      }
+      line++;
+    }
 
-    }  // Next line of current subtitle
-
-    // Write corrected text lines to output file.
-    fprintf (fo, "%s", alltext);
-    fprintf (fo, "\n");
-
-  }  // Next subtitle
-
-  // Close output file.
-  fclose (fo);
-
-  // Free allocated memory.
-  free (temp);
-  free (bom);
-  free (filename);
-  for (line=0; line<(alllines + 1); line++) {
-    free (input[line]);
+    // Write blank line between subtitles.
+    if (output_ok && (fputc ('\n', fo) == EOF)) output_ok = 0;
+    line++;  // Skip input blank separator.
   }
+
+  if (ferror (fo)) output_ok = 0;
+  if (fclose (fo) != 0) output_ok = 0;
+
+  if (!output_ok) {
+    fprintf (stderr, "ERROR: Unable to write complete output file out.srt.\n");
+    remove ("out.srt");
+  }
+
+  for (line = 0; line < (alllines + 1); line++) free (input[line]);
   free (input);
-  for (i=0; i<MAXLINES; i++) {
-    free (text[i]);
-  }
-  free (text);
-  free (alltext);
+
+  if (!output_ok) return (EXIT_FAILURE);
+
+  fprintf (stdout, "%i subtitles written.\n\n", nsubs);
 
   return (EXIT_SUCCESS);
 }
 
-// Read a single line of text from a text file.
-// Returns -1 if EOF is encountered.
+// Read a single line of text from a subtitle/text file.
+// The terminating line-feed is retained when one is present in the input.
+// Carriage returns are discarded so LF and CRLF input are handled identically.
+//
+// Returns:
+//   0  - line successfully read
+//  -1  - EOF encountered before any characters were read
+//  -2  - line is too long for the supplied buffer
+//  -3  - invalid arguments or input error
 int
 readline (FILE *fi, char *line, int limit) {
 
-  int i, n;
+  int ch, i;
 
-  i = 0;  // i is pointer to byte in line.
-  while (i < limit) {
+  if ((fi == NULL) || (line == NULL) || (limit < 2)) {
+    return (-3);
+  }
 
-    // Grab next byte from file.
-    n = fgetc (fi);
+  i = 0;
+  for (;;) {
+
+    ch = fgetc (fi);
 
     // End of file reached.
-    // Tell calling function, by returning -1, that we're at end of file, so it won't call readline() again.
-    if (n == EOF) {
+    if (ch == EOF) {
 
-      // If there's no end of line at the end of the file, ensure string termination.
-      if (i > 0) {
-        line[i] = 0;
-        return (0);
+      // File stream error encountered.
+      if (ferror (fi)) {
+        line[0] = '\0';
+        return (-3);
       }
-      return (-1);
-    }
 
-    // Found a carriage return. Ignore it.
-    if (n == '\r') {
-      continue;
-    }
+      // No characters were read for this line.
+      if (i == 0) {
+        line[0] = '\0';
+        return (-1);
+      }
 
-    // Seems to be a valid character. Keep it.
-    line[i] = n;
-    i++;
-
-    // Found a newline.
-    // Break out of loop since this is the end of the current line.
-    if (n == '\n') { 
+      // Accept a final line that does not end with a line-feed.
+      line[i] = '\0';
       return (0);
     }
 
-  }
+    // Ignore carriage returns so CRLF input is treated as LF input.
+    if (ch == '\r') {
+      continue;
+    }
 
-  // Advance to next line.
-  n = 0;
-  while ((n != '\n') && (n != EOF)) {
-    n = fgetc (fi);
-  }
+    // Found a line-feed. Retain it because the subtitle tools use a line
+    // containing only '\n' to identify the blank line between subtitles.
+    if (ch == '\n') {
 
-  return (0);
+      // Line too long for supplied buffer.
+      if (i >= (limit - 1)) {
+        line[limit - 1] = '\0';
+        return (-2);
+      }
+
+      line[i++] = '\n';
+      line[i] = '\0';
+      return (0);
+    }
+
+    // Reserve one byte for the terminating null character. If the line is too
+    // long, discard the rest of the physical line so the next call starts at
+    // the beginning of the following line.
+    if (i >= (limit - 1)) {
+      line[limit - 1] = '\0';
+      while ((ch = fgetc (fi)) != '\n' && ch != EOF) {
+      }
+      if ((ch == EOF) && ferror (fi)) {
+        return (-3);
+      }
+      return (-2);
+    }
+
+    line[i++] = (char) ch;
+  }
 }
 
 // Detect Byte Order Mark (BOM), if it exists, at beginning of line.
 // Return index of bom array corresponding to type of BOM detected,
 // or return -1 if none (or unlisted type) detected.
 int
-byteordermark (char *text, BOM *bom) {
+byteordermark (const char *text, const BOM *bom) {
 
-  int type, i, found;
+  int type, i, found, best, bestlen;
 
-  // Loop through all types of Byte Order Marks.
+  if ((text == NULL) || (bom == NULL)) return (-1);
+
+  best = -1;
+  bestlen = 0;
+
+  // Keep the longest matching BOM because some shorter BOMs are prefixes of
+  // longer ones (for example UTF-16 LE is a prefix of UTF-32 LE).
   for (type=0; type<MAXBOM; type++) {
 
-    found = 1;  // Default to current type detected.
+    found = 1;
     for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) found = 0;
+      if ((uint8_t) text[i] != bom[type].sequence[i]) {
+        found = 0;
+        break;
+      }
     }
 
-    // We found a match.
-    if (found) return (type);
+    if (found && (bom[type].len > bestlen)) {
+      best = type;
+      bestlen = bom[type].len;
+    }
   }
 
-  // Failed to find a match.
-  return (-1);
+  return (best);
 }
 
-// Search a string for a subtring and remove the substring.
-// Ignores case of string and substring.
+// Search a string for a substring and remove it.
+// Matching is case-insensitive. For font and position opening tags, the entire
+// tag through the corresponding closing delimiter is removed.
 int
 searchandremove (char *string, const char *sub) {
 
-  int len, lenbeforematch, iresult;
-  char *currentpos, *matchpos, *result;
+  size_t sublen;
+  char *matchpos, *endpos, *scan;
+  int variable_tag;
 
-  // Allocate memory for various arrays.
-  result = allocate_strmem (MAXLEN);
-
-  // Edge case check: If the substring is empty, we don't do anything.
-  if (sub == NULL || *sub == '\0' || string == NULL) {
+  if ((string == NULL) || (sub == NULL) || (*sub == '\0')) {
     return (EXIT_SUCCESS);
   }
 
-  // Calculate length of the substring.
-  len = strnlen (sub, MAXLEN);
+  sublen = strlen (sub);
+  scan = string;
 
-  currentpos = string;
-  iresult = 0;  // Index within result, the newly constructed string.
+  variable_tag = starts_case_insensitive (sub, "<font") ||
+                 starts_case_insensitive (sub, "< font") ||
+                 starts_case_insensitive (sub, "{\\an") ||
+                 starts_case_insensitive (sub, "{ \\an") ||
+                 starts_case_insensitive (sub, "{\\ an") ||
+                 starts_case_insensitive (sub, "{ \\ an");
 
-  while ((matchpos = strcasestr (currentpos, sub)) != NULL) {
+  while ((matchpos = find_case_insensitive (scan, sub)) != NULL) {
 
-    // Copy the part of the original string before the match.
-    lenbeforematch = matchpos - currentpos;
-    strncpy (result + iresult, currentpos, lenbeforematch);  // Won't be > MAXLEN
-    iresult += lenbeforematch;
-
-    // Move the current position pointer past the closing bracket of markup tag.
-
-    // Font color or font size
-    if ((strncmp (sub, "<font", 5) == 0) || (strncmp (sub, "< font", 6) == 0)) {
-      while ((currentpos[0] != '>') && (currentpos[0] != 0)) {
-        currentpos++;
+    // Opening font tags contain an attribute value, so remove through '>'.
+    if (starts_case_insensitive (sub, "<font") || starts_case_insensitive (sub, "< font")) {
+      endpos = strchr (matchpos, '>');
+      if (endpos == NULL) {
+        scan = matchpos + sublen;
+        continue;
       }
-      currentpos++;  // Move past '>'.
+      endpos++;
 
-    // Position
-    } else if ((strncmp (sub, "{\\an", 4) == 0) || (strncmp (sub, "{ \\an", 5) == 0) ||
-               (strncmp (sub, "{\\ an", 5) == 0) || (strncmp (sub, "{ \\ an", 6) == 0)) {
-      while ((currentpos[0] != '}') && (currentpos[0] != 0)) {
-        currentpos++;
+    // Position tags contain the alignment number, so remove through '}'.
+    } else if (variable_tag) {
+      endpos = strchr (matchpos, '}');
+      if (endpos == NULL) {
+        scan = matchpos + sublen;
+        continue;
       }
-      currentpos++;  // Move past '}'
+      endpos++;
 
-    // All other tags
+    // Fixed markup tag.
     } else {
-      currentpos = matchpos + len;
+      endpos = matchpos + sublen;
+    }
+
+    memmove (matchpos, endpos, strlen (endpos) + 1u);
+    scan = matchpos;
+  }
+
+  return (EXIT_SUCCESS);
+}
+
+static char *
+find_case_insensitive (char *string, const char *sub) {
+
+  size_t i, j, stringlen, sublen;
+
+  if ((string == NULL) || (sub == NULL)) return (NULL);
+
+  stringlen = strlen (string);
+  sublen = strlen (sub);
+  if ((sublen == 0u) || (sublen > stringlen)) return (NULL);
+
+  for (i=0; i<=(stringlen - sublen); i++) {
+    for (j=0; j<sublen; j++) {
+      if (tolower ((unsigned char) string[i + j]) != tolower ((unsigned char) sub[j])) {
+        break;
+      }
+    }
+    if (j == sublen) return (&string[i]);
+  }
+
+  return (NULL);
+}
+
+static int
+starts_case_insensitive (const char *string, const char *prefix) {
+
+  size_t i, prefixlen;
+
+  if ((string == NULL) || (prefix == NULL)) return (0);
+
+  prefixlen = strlen (prefix);
+  for (i=0; i<prefixlen; i++) {
+    if (string[i] == '\0') return (0);
+    if (tolower ((unsigned char) string[i]) != tolower ((unsigned char) prefix[i])) {
+      return (0);
     }
   }
 
-  // Copy the remaining part of the string after the last match.
-  strncpy (result + iresult, currentpos, MAXLEN - iresult);
+  return (1);
+}
 
-  // Copy the result back into the original string.
-  memset (string, 0, MAXLEN * sizeof (char));
-  strncpy (string, result, MAXLEN);
+static int
+write_line (FILE *fo, const char *line) {
 
-  // Free allocated memory.
-  free (result);
+  size_t len;
+
+  if ((fo == NULL) || (line == NULL)) return (EXIT_FAILURE);
+
+  if (fputs (line, fo) == EOF) return (EXIT_FAILURE);
+
+  len = strlen (line);
+  if ((len == 0u) || (line[len - 1u] != '\n')) {
+    if (fputc ('\n', fo) == EOF) return (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }
@@ -567,82 +702,38 @@ searchandremove (char *string, const char *sub) {
 char *
 allocate_strmem (int len) {
 
-  void *tmp;
+  char *tmp;
 
   if (len <= 0) {
     fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
+  tmp = calloc ((size_t) len, sizeof (*tmp));
+  if (tmp == NULL) {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
     exit (EXIT_FAILURE);
   }
+
+  return (tmp);
 }
 
 // Allocate memory for an array of pointers to arrays of chars.
 char **
 allocate_strmemp (int len) {
 
-  void *tmp;
+  char **tmp;
 
   if (len <= 0) {
     fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmemp().\n", len);
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char **) malloc (len * sizeof (char *));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char *));
-    return (tmp);
-  } else {
+  tmp = calloc ((size_t) len, sizeof (*tmp));
+  if (tmp == NULL) {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmemp().\n");
     exit (EXIT_FAILURE);
   }
-}
 
-// Allocate memory for an array of ints.
-int *
-allocate_intmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_intmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (int *) malloc (len * sizeof (int));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (int));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_intmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of BOM (Byte Order Mark) structs.
-BOM *
-allocate_bommem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_bommem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (BOM *) malloc (len * sizeof (BOM));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (BOM));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_bommem().\n");
-    exit (EXIT_FAILURE);
-  }
+  return (tmp);
 }

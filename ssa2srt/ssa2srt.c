@@ -1,4 +1,4 @@
-/*  Copyright (C) 2024-2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2024-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -31,16 +31,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>  // For modf
+#include <stdint.h>
+#include <limits.h>
+#include <ctype.h>
+#include <math.h>
 #include <errno.h>
 
 // Function prototypes
 int readline (FILE *, char *, int);
-int find_index (char *, char *, int *);
-int extract_string (char *, int, char, char *);
-int extract_int (char *, int, int *);
-int parse_time (char *, int *, int *, int *, int *);
-int parse_color (char *, FILE *);
+int read_ssa_line (FILE *, char *, int, int *);
+int find_index (const char *, const char *, int *);
+int extract_string (const char *, int, char, char *);
+int extract_int (const char *, int, int *);
+int parse_time (const char *, int *, int *, int *, int *);
+int parse_color (const char *, FILE *);
 int fix_text (char *);
 char *allocate_strmem (int);
 char **allocate_strmemp (int);
@@ -56,10 +60,14 @@ main (int argc, char **argv) {
   int i, j, eofile, len, sub, shh, smm, sss, sms, ehh, emm, ess, ems;
   int clrstyle, boldstyle, italicstyle, underlinestyle, strikeoutstyle, alignstyle;
   int style, nstyles, iname, iclr, ibold, iital, iunderline, istrikeout, ialign, istart, iend, istyle, itext;
+  int lineno, v4plus, events_found, utf8bom;
   int *stylebold, *styleitalic, *styleunderline, *stylestrikeout, *stylealign;
   int italflag, boldflag, underlineflag, strikeoutflag, colorflag;
-  char *temp, *filename, *string, *text, **stylename, **styleclr, *format;
+  char *temp, *string, *text, **stylename, **styleclr;
+  const char *filename;
   FILE *fi, *fo;
+  unsigned char bombytes[4];
+  size_t nbom;
 
   // Notes:
   //   An override tag embedded within subtitle text will override the corresponding Style attribute until the override closure tag,
@@ -70,27 +78,23 @@ main (int argc, char **argv) {
   //   We assume SSA file Styles always use 1,2,3/+4/+8 format.
   // Italic override tags
   //   {\i1} italics on (use <i> for srt)
-  //   {\i0} italics off (use <\i> for srt); {\i} is also handled, as it is sometimes encountered.
+  //   {\i0} italics off (use </i> for srt); {\i} is also handled, as it is sometimes encountered.
   // Bold override tags
   //   {\b1} bold on (use <b> for srt)
   //   {\b0} bold off (use </b> for srt)
   // Underline override tags
-  //   {\u1} bold on (use <u> for srt)
-  //   {\u0} bold off (use </u> for srt)
+  //   {\u1} underline on (use <u> for srt)
+  //   {\u0} underline off (use </u> for srt)
   // Strikeout override tags
   //   {\s1} strikeout on (use <s> for srt)
   //   {\s0} strikeout off (use </s> for srt)
 
-  // Allocate memory for various arrays.
-  filename = allocate_strmem (MAXLEN);
-
   // Process the command line arguments, if any.
   if (argc == 2) {
-    strncpy (filename, argv[1], MAXLEN);
+    filename = argv[1];
   } else {
     fprintf (stdout, "\nUsage: ./ssa2srt inputfilename\n");
     fprintf (stdout, "       Output filename will be out.srt.\n\n");
-    free (filename);
     return (EXIT_SUCCESS);
   }
 
@@ -98,7 +102,6 @@ main (int argc, char **argv) {
   temp = allocate_strmem (MAXLEN);
   string = allocate_strmem (MAXLEN);
   text = allocate_strmem (MAXLEN);
-  format = allocate_strmem (MAXLEN);
   stylename = allocate_strmemp (MAXSTYLES);
   styleclr = allocate_strmemp (MAXSTYLES);
   for (i=0; i<MAXSTYLES; i++) {
@@ -112,26 +115,66 @@ main (int argc, char **argv) {
   stylealign = allocate_intmem (MAXSTYLES);
 
   // Open existing SubStationAlpha file.
-  fi = fopen (filename, "r");
+  fi = fopen (filename, "rb");
   if (fi == NULL) {
     fprintf (stderr, "ERROR: Unable to open input SubStationAlpha file %s.\n", filename);
     exit (EXIT_FAILURE);
   }
+
+  // Check for a Unicode BOM. This converter operates on byte-oriented UTF-8
+  // text, so preserve UTF-8 and reject UTF-16/UTF-32 before parsing. Test the
+  // four-byte BOMs before the two-byte BOMs because UTF-32LE begins with FF FE.
+  memset (bombytes, 0, sizeof (bombytes));
+  nbom = fread (bombytes, 1, sizeof (bombytes), fi);
+  if (ferror (fi)) {
+    fprintf (stderr, "ERROR: Unable to read input SubStationAlpha file %s.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+  rewind (fi);
+
+  utf8bom = 0;
+  if ((nbom >= 4U) && (bombytes[0] == 0x00U) && (bombytes[1] == 0x00U) && (bombytes[2] == 0xfeU) && (bombytes[3] == 0xffU)) {
+    fprintf (stderr, "ERROR: UTF-32 (BE) input is not supported; convert the SSA file to UTF-8 first.\n");
+    exit (EXIT_FAILURE);
+  }
+  if ((nbom >= 4U) && (bombytes[0] == 0xffU) && (bombytes[1] == 0xfeU) && (bombytes[2] == 0x00U) && (bombytes[3] == 0x00U)) {
+    fprintf (stderr, "ERROR: UTF-32 (LE) input is not supported; convert the SSA file to UTF-8 first.\n");
+    exit (EXIT_FAILURE);
+  }
+  if ((nbom >= 2U) && (bombytes[0] == 0xfeU) && (bombytes[1] == 0xffU)) {
+    fprintf (stderr, "ERROR: UTF-16 (BE) input is not supported; convert the SSA file to UTF-8 first.\n");
+    exit (EXIT_FAILURE);
+  }
+  if ((nbom >= 2U) && (bombytes[0] == 0xffU) && (bombytes[1] == 0xfeU)) {
+    fprintf (stderr, "ERROR: UTF-16 (LE) input is not supported; convert the SSA file to UTF-8 first.\n");
+    exit (EXIT_FAILURE);
+  }
+  if ((nbom >= 3U) && (bombytes[0] == 0xefU) && (bombytes[1] == 0xbbU) && (bombytes[2] == 0xbfU)) {
+    utf8bom = 1;
+    if (fseek (fi, 3L, SEEK_SET) != 0) {
+      fprintf (stderr, "ERROR: Unable to position input SubStationAlpha file %s.\n", filename);
+      exit (EXIT_FAILURE);
+    }
+  }
+
+  lineno = 0;
 
   // Search for V4 or V4+ Style definitions.
   do {
 
     // Read line of text from input file.
     memset (temp, 0, MAXLEN * sizeof (char));
-    if (readline (fi, temp, MAXLEN) == -1) {
+    if (read_ssa_line (fi, temp, MAXLEN, &lineno) == -1) {
       break;  // Reached end of file.
     }
 
   } while ((strncmp (temp, "[V4 Styles]", 11) != 0) && (strncmp (temp, "[V4+ Styles]", 12) != 0));
 
+  v4plus = 0;
   if (strncmp (temp, "[V4 Styles]", 11) == 0)  {
     fprintf (stdout, "\nV4 Styles are defined.\n");
   } else if (strncmp (temp, "[V4+ Styles]", 12) == 0)  {
+    v4plus = 1;
     fprintf (stdout, "\nV4+ Styles are defined.\n");
   } else {
     fprintf (stderr, "\nSSA file does not use [V4 Styles] or [V4+ Styles].\n");
@@ -143,8 +186,12 @@ main (int argc, char **argv) {
 
     // Read line of text from input file.
     memset (temp, 0, MAXLEN * sizeof (char));
-    if (readline (fi, temp, MAXLEN) == -1) {
-      fprintf (stderr, "ERROR: Could not file the V4 Styles Format line.\n");
+    if (read_ssa_line (fi, temp, MAXLEN, &lineno) == -1) {
+      fprintf (stderr, "ERROR: Could not find the V4 Styles Format line.\n");
+      exit (EXIT_FAILURE);
+    }
+    if ((temp[0] == '[') && (strncmp (temp, "Format:", 7) != 0)) {
+      fprintf (stderr, "ERROR: V4 Styles section has no Format line.\n");
       exit (EXIT_FAILURE);
     }
 
@@ -152,11 +199,11 @@ main (int argc, char **argv) {
 
   // Determine Style attribute indices in Style Format.
   // Other style attributes are ignored; many aren't implemented in SubRip (i.e., srt) specification.
-  len = strnlen (temp, MAXLEN);
 
   // Find Name index in Styles Format.
-  if (find_index (temp, "Name", &iname)) {
-//    fprintf (stdout, "Name index in Style definitions: %i\n", iname);
+  if (!find_index (temp, "Name", &iname)) {
+    fprintf (stderr, "ERROR: Cannot find Name in Styles Format: %s", temp);
+    exit (EXIT_FAILURE);
   }
 
   // Find PrimaryColour index in Styles Format.
@@ -196,23 +243,33 @@ main (int argc, char **argv) {
 
     // Read line of text from input file.
     memset (temp, 0, MAXLEN * sizeof (char));
-    if (readline (fi, temp, MAXLEN) == -1) {
+    if (read_ssa_line (fi, temp, MAXLEN, &lineno) == -1) {
       break;  // Reached end of file.
     }
 
     if (strncmp (temp, "Style:", 6) == 0) {
 
+      if (nstyles >= MAXSTYLES) {
+        fprintf (stderr, "ERROR: More than %d Style definitions were found.\n", MAXSTYLES);
+        exit (EXIT_FAILURE);
+      }
+
       // Extract Style name. If a Style is defined, it must always have a name.
       // We assume there exists at least one Style definition.
-      extract_string (temp, iname, ',', stylename[nstyles]);
+      if (extract_string (temp, iname, ',', stylename[nstyles]) != EXIT_SUCCESS) {
+        fprintf (stderr, "ERROR: Cannot extract Name from Style definition: %s", temp);
+        exit (EXIT_FAILURE);
+      }
 //fprintf (stdout, "Stylename: %s\n", stylename[nstyles]);
 
       // Extract PrimaryColour setting for this Style.
       // Extract as string because format color values are expressed in decimal or hexadecimal.
       // Will be processed later by parse_color().
       if (clrstyle) {
-        extract_string (temp, iclr, ',', styleclr[nstyles]);
-        strcat (styleclr[nstyles], "&");
+        if (extract_string (temp, iclr, ',', styleclr[nstyles]) != EXIT_SUCCESS) {
+          fprintf (stderr, "ERROR: Cannot extract PrimaryColour from Style definition: %s", temp);
+          exit (EXIT_FAILURE);
+        }
 //fprintf (stdout, "  PrimaryColour: %s\n", styleclr[nstyles]);
       }
 
@@ -220,7 +277,10 @@ main (int argc, char **argv) {
       // Bold index is ibold
       // -1 = bold on, 0 = bold off
       if (boldstyle) {
-        extract_int (temp, ibold, &stylebold[nstyles]);
+        if (extract_int (temp, ibold, &stylebold[nstyles]) != EXIT_SUCCESS) {
+          fprintf (stderr, "ERROR: Cannot extract Bold from Style definition: %s", temp);
+          exit (EXIT_FAILURE);
+        }
 //fprintf (stdout, "  Bold: %i\n", stylebold[nstyles]);
       }  // End if boldstyle
 
@@ -228,7 +288,10 @@ main (int argc, char **argv) {
       // Italics index is iital
       // -1 = italics on, 0 = italics off
       if (italicstyle) {
-        extract_int (temp, iital, &styleitalic[nstyles]);
+        if (extract_int (temp, iital, &styleitalic[nstyles]) != EXIT_SUCCESS) {
+          fprintf (stderr, "ERROR: Cannot extract Italic from Style definition: %s", temp);
+          exit (EXIT_FAILURE);
+        }
 //fprintf (stdout, "  Italic: %i\n", styleitalic[nstyles]);
       }  // End if italicstyle
 
@@ -236,7 +299,10 @@ main (int argc, char **argv) {
       // Underline index is iunderline
       // -1 = underline on, 0 = underline off
       if (underlinestyle) {
-        extract_int (temp, iunderline, &styleunderline[nstyles]);
+        if (extract_int (temp, iunderline, &styleunderline[nstyles]) != EXIT_SUCCESS) {
+          fprintf (stderr, "ERROR: Cannot extract Underline from Style definition: %s", temp);
+          exit (EXIT_FAILURE);
+        }
 //fprintf (stdout, "  Underline: %i\n", styleunderline[nstyles]);
       }  // End if underlinestyle
 
@@ -244,14 +310,20 @@ main (int argc, char **argv) {
       // StrikeOut index is istrikeout
       // -1 = strikeout on, 0 = strikeout off
       if (strikeoutstyle) {
-        extract_int (temp, istrikeout, &stylestrikeout[nstyles]);
+        if (extract_int (temp, istrikeout, &stylestrikeout[nstyles]) != EXIT_SUCCESS) {
+          fprintf (stderr, "ERROR: Cannot extract StrikeOut from Style definition: %s", temp);
+          exit (EXIT_FAILURE);
+        }
 //fprintf (stdout, "  Strikeout: %i\n", stylestrikeout[nstyles]);
       }  // End if strikeoutstyle
 
       // Extract Alignment setting for this Style.
       // Alignment index is ialign
       if (alignstyle) {
-        extract_int (temp, ialign, &stylealign[nstyles]);
+        if (extract_int (temp, ialign, &stylealign[nstyles]) != EXIT_SUCCESS) {
+          fprintf (stderr, "ERROR: Cannot extract Alignment from Style definition: %s", temp);
+          exit (EXIT_FAILURE);
+        }
 //fprintf (stdout, "  Alignment: %i\n", stylealign[nstyles]);
       }  // End if alignstyle
 
@@ -263,26 +335,43 @@ main (int argc, char **argv) {
     }
 
   }  // Next line.
-fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
+
+  if (nstyles == 0) {
+    fprintf (stderr, "ERROR: No Style definitions were found.\n");
+    exit (EXIT_FAILURE);
+  }
+  fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
+
+  // The first non-Style line may itself be the Events section header.
+  events_found = (strncmp (temp, "[Events]", 8) == 0);
 
   // Find Events in SSA file.
-  do {
+  while (!events_found) {
 
     // Read line of text from input file.
     memset (temp, 0, MAXLEN * sizeof (char));
-    if (readline (fi, temp, MAXLEN) == -1) {
+    if (read_ssa_line (fi, temp, MAXLEN, &lineno) == -1) {
       break;  // Reached end of file.
     }
+    if (strncmp (temp, "[Events]", 8) == 0) events_found = 1;
+  }
 
-  } while (strncmp (temp, "[Events]", 10) != 0);
+  if (!events_found) {
+    fprintf (stderr, "ERROR: Cannot find [Events] section.\n");
+    exit (EXIT_FAILURE);
+  }
 
   // Find Format line of Events Section.
   do {
 
     // Read line of text from input file.
     memset (temp, 0, MAXLEN * sizeof (char));
-    if (readline (fi, temp, MAXLEN) == -1) {
-      fprintf (stderr, "ERROR: Could not file the Events Format line.\n");
+    if (read_ssa_line (fi, temp, MAXLEN, &lineno) == -1) {
+      fprintf (stderr, "ERROR: Could not find the Events Format line.\n");
+      exit (EXIT_FAILURE);
+    }
+    if ((temp[0] == '[') && (strncmp (temp, "Format:", 7) != 0)) {
+      fprintf (stderr, "ERROR: Events section has no Format line.\n");
       exit (EXIT_FAILURE);
     }
 
@@ -320,16 +409,25 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
 //      fprintf (stdout, "Text index in Events Format: %i\n", itext);
     }
 
-  // Open output file.
-  fo = fopen ("out.srt", "r");
-  if (fo != NULL) {
-    fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
+  // Open output file. The "x" mode prevents accidental replacement.
+  errno = 0;
+  fo = fopen ("out.srt", "wx");
+  if (fo == NULL) {
+    if (errno == EEXIST) {
+      fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
+    } else {
+      fprintf (stderr, "ERROR: Unable to open output file out.srt.\n");
+    }
     exit (EXIT_FAILURE);
   }
-  fo = fopen ("out.srt", "w");
-  if (fo == NULL) {
-    fprintf (stderr, "ERROR: Unable to open output file out.srt.\n");
-    exit (EXIT_FAILURE);
+
+  // Preserve a UTF-8 BOM when one was present in the input file.
+  if (utf8bom) {
+    static const unsigned char utf8mark[3] = {0xefU, 0xbbU, 0xbfU};
+    if (fwrite (utf8mark, 1, sizeof (utf8mark), fo) != sizeof (utf8mark)) {
+      fprintf (stderr, "ERROR: Unable to write UTF-8 BOM to out.srt.\n");
+      exit (EXIT_FAILURE);
+    }
   }
 
   // Loop through Dialogue events in SSA file and save subtitles to srt file.
@@ -342,14 +440,14 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
 
       // Read line of text from input file.
       memset (temp, 0, MAXLEN * sizeof (char));
-      if (readline (fi, temp, MAXLEN) == -1) {
+      if (read_ssa_line (fi, temp, MAXLEN, &lineno) == -1) {
 
         // Reached end of file.
         eofile = 1;
         break;
       }
-    } while (strncmp (temp, "Dialogue: ", 10) != 0);
-    len = strnlen (temp, MAXLEN);  // Length of Dialogue line
+    } while (strncmp (temp, "Dialogue:", 9) != 0);
+    len = (int) strlen (temp);  // Length of Dialogue line
 //fprintf (stdout, "Length of Dialogue line: %i\n", len);
     if (eofile) break;
 
@@ -358,75 +456,39 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
 //fprintf (stdout, "%i\n", sub);
 
     // Extract Start time.
-    i = 0;  // Index of temp
-    j = 0;  // Comma count
-    while ((j != istart) && (i < len)) {
-      if (temp[i] == ',') j++;
-      i++;
-    }
-    memset (string, 0, MAXLEN * sizeof (char));
-    j = 0;  // Index of string
-    while (i < len) {
-      if (temp[i] != ',') {
-        string[j] = temp[i];
-        i++;
-        j++;
-      } else {
-        break;
-      }
+    if (extract_string (temp, istart, ',', string) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Cannot extract Start from Dialogue line: %s", temp);
+      exit (EXIT_FAILURE);
     }
 //fprintf (stdout, "Start: %s\n", string);
-    parse_time (string, &shh, &smm, &sss, &sms);
+    if (parse_time (string, &shh, &smm, &sss, &sms) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Invalid SSA start timestamp '%s'.\n", string);
+      exit (EXIT_FAILURE);
+    }
 
     // Extract End time.
-    i = 0;  // Index of temp
-    j = 0;  // Comma count
-    while ((j != iend) && (i < len)) {
-      if (temp[i] == ',') j++;
-      i++;
-    }
-    memset (string, 0, MAXLEN * sizeof (char));
-    j = 0;  // Index of string
-    while (i < len) {
-      if (temp[i] != ',') {
-        string[j] = temp[i];
-        i++;
-        j++;
-      } else {
-        break;
-      }
+    if (extract_string (temp, iend, ',', string) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Cannot extract End from Dialogue line: %s", temp);
+      exit (EXIT_FAILURE);
     }
 //fprintf (stdout, "End: %s\n", string);
-    parse_time (string, &ehh, &emm, &ess, &ems);
+    if (parse_time (string, &ehh, &emm, &ess, &ems) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Invalid SSA end timestamp '%s'.\n", string);
+      exit (EXIT_FAILURE);
+    }
 
     // Write subtitle start and end times.
     fprintf (fo, "%02i:%02i:%02i,%03i --> %02i:%02i:%02i,%03i\n", shh, smm, sss, sms, ehh, emm, ess, ems);
 
     // Extract Style name.
-    i = 0;  // Index of temp
-    j = 0;  // Comma count
-    while ((j != istyle) && (i < len)) {
-      if (temp[i] == ',') j++;
-      i++;
+    if (extract_string (temp, istyle, ',', string) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Cannot extract Style from Dialogue line: %s", temp);
+      exit (EXIT_FAILURE);
     }
-    memset (string, 0, MAXLEN * sizeof (char));
-    j = 0;  // Index of string
-    while (i < len) {
-      if (temp[i] != ',') {
 
-        // Ignore is there is a leading * (don't know why this sometimes appears).
-        if (temp[i] == '*') {
-          i++;
-
-        // Copy style name.
-        } else {
-          string[j] = temp[i];
-          i++;
-          j++;
-        }
-      } else {
-        break;
-      }
+    // A leading '*' is sometimes encountered before a Style name.
+    if (string[0] == '*') {
+      memmove (string, string + 1, strlen (string));
     }
 //fprintf (stdout, "Style name: %s\n", string);
 
@@ -434,58 +496,66 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
     for (style=0; style<nstyles; style++) {
       if (strcmp (string, stylename[style]) == 0) break;
     }
+    if (style == nstyles) {
+      fprintf (stderr, "ERROR: Dialogue refers to undefined Style '%s'.\n", string);
+      exit (EXIT_FAILURE);
+    }
 
     // Extract Text.
-    extract_string (temp, itext, '\n', text);
+    if (extract_string (temp, itext, '\n', text) != EXIT_SUCCESS) {
+      fprintf (stderr, "ERROR: Cannot extract Text from Dialogue line: %s", temp);
+      exit (EXIT_FAILURE);
+    }
 
     // Correct erroneous SubRip tags in Text.
     fix_text (text);
 
-    len = strnlen (text, MAXLEN);  // Length of Text portion of Dialogue line.
+    len = (int) strlen (text);  // Length of Text portion of Dialogue line.
 //fprintf (stdout, "Text (ssa): %s\n", text);
 
     // Apply Styles
 
     // Apply PrimaryColour style of current Text by parsing styleclr string for current Dialogue's style.
     // These can be overridden by color tags in Text.
-    parse_color (styleclr[style], fo);
+    if (clrstyle) {
+      if (parse_color (styleclr[style], fo) != EXIT_SUCCESS) {
+        fprintf (stderr, "ERROR: Invalid PrimaryColour '%s' for Style '%s'.\n", styleclr[style], stylename[style]);
+        exit (EXIT_FAILURE);
+      }
+    }
 
     // Apply Alignment style of current Text. These can be overridden by alignment tags within Text.
     // It seems Styles use 1,2,3 +4 and +8 notation (i.e., not numpad).
     if (alignstyle) {
-      switch (stylealign[style]) {
-        case 1:
-          fprintf (fo, "{\\an1}");  // Bottom-left
-          break;
-        case 2:  // This should be defaulted to by media player.
-//          fprintf (fo, "{\\an2}");  // Bottom-center
-          break;
-        case 3:
-          fprintf (fo, "{\\an3}");  // Bottom-right
-          break;
-        case 5:
-          fprintf (fo, "{\\an7}");  // Top-left
-          break;
-        case 6:
-          fprintf (fo, "{\\an8}");  // Top-center
-          break;
-        case 7:
-          fprintf (fo, "{\\an9}");  // Top-right
-          break;
-        case 9:
-          fprintf (fo, "{\\an4}");  // Middle-left
-          break;
-        case 10:
-          fprintf (fo, "{\\an5}");  // Middle-center
-          break;
-        case 11:
-          fprintf (fo, "{\\an6}");  // Middle-right
-          break;
-        default:
-          fprintf (stderr, "ERROR: Unknown style alignment stylealign[istyle] = %i.\n", stylealign[style]);
+
+      // V4+ (ASS) uses numpad alignment values 1 through 9 directly.
+      if (v4plus) {
+        if ((stylealign[style] < 1) || (stylealign[style] > 9)) {
+          fprintf (stderr, "ERROR: Unknown V4+ Style alignment value %i.\n", stylealign[style]);
           exit (EXIT_FAILURE);
-      }  // End switch(stylealign[style])
-    }  // End if alignstyle
+        }
+        if (stylealign[style] != 2) {
+          fprintf (fo, "{\\an%i}", stylealign[style]);
+        }
+
+      // V4 SSA uses the older 1/2/3 plus 4 (top) and 8 (middle) scheme.
+      } else {
+        switch (stylealign[style]) {
+          case 1:  fprintf (fo, "{\\an1}"); break;
+          case 2:  break;  // Bottom-center is the normal SubRip default.
+          case 3:  fprintf (fo, "{\\an3}"); break;
+          case 5:  fprintf (fo, "{\\an7}"); break;
+          case 6:  fprintf (fo, "{\\an8}"); break;
+          case 7:  fprintf (fo, "{\\an9}"); break;
+          case 9:  fprintf (fo, "{\\an4}"); break;
+          case 10: fprintf (fo, "{\\an5}"); break;
+          case 11: fprintf (fo, "{\\an6}"); break;
+          default:
+            fprintf (stderr, "ERROR: Unknown V4 Style alignment value %i.\n", stylealign[style]);
+            exit (EXIT_FAILURE);
+        }
+      }
+    }
 
     // Apply Bold style of current Text. This may be overridden by bold tags within Text.
     if ((boldstyle) && (stylebold[style] == -1)) {
@@ -512,19 +582,21 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
     // Loop through chars of current Text.
     i = 0;  // Index of current Dialogue's Text, which is array text.
     colorflag = 0;  // Default to no color markup; this flag is needed in order to add </font> if {\c} missing from Text.
+    boldflag = 0;
+    italflag = 0;
+    underlineflag = 0;
+    strikeoutflag = 0;
     while (i < len) {
 
-      // Initialize flags used for correcting SSA override format errors of current Text line.
-      // Sometimes closing override tags are missing.
-      boldflag = 0;
-      italflag = 0;
-      underlineflag = 0;
-      strikeoutflag = 0;
-
       // Line-feed found.
-      if ((text[i] == '\\') && ((text[i+1] == 'n') || (text[i+1] == 'N'))) {
-          fprintf (fo, "\n");
-          i += 2;
+      if ((text[i] == '\\') && ((i + 1) < len) && ((text[i+1] == 'n') || (text[i+1] == 'N'))) {
+        fprintf (fo, "\n");
+        i += 2;
+
+      // SSA hard space. SubRip has no direct equivalent, so use an ordinary space.
+      } else if ((text[i] == '\\') && ((i + 1) < len) && (text[i+1] == 'h')) {
+        fputc (' ', fo);
+        i += 2;
 
       /* Process any override formats if { found.
          Override formats are formats embedded within Text which override Style formatting.
@@ -595,21 +667,33 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
 
           // Primary font color on; overrides PrimaryColour style, if any.
           } else if (strncmp (&text[i], "c&H", 3) == 0) {
+
+            // A new color override replaces an earlier color override.
+            if (colorflag) fprintf (fo, "</font>");
             colorflag = 1;
 
             // Copy color definition to temporary string.
             memset (temp, 0, MAXLEN * sizeof (char));
-            i++;  // Move past c
-            j = 0;  // Index of temp
-            do {
-              temp[j] = text[i];
-              i++;
-              j++;
-              if (i == len) break;
-            } while (text[i] != '&');
-            temp[j] = '&';
-            i++;
-            parse_color (temp, fo);  // Parse color string; save to output file.
+            i++;  // Move past c; temp begins with &H...
+            j = 0;
+            while ((i < len) && (text[i] != '&')) {
+              if (j >= (MAXLEN - 2)) {
+                fprintf (stderr, "ERROR: Color override is too long.\n");
+                exit (EXIT_FAILURE);
+              }
+              temp[j++] = text[i++];
+            }
+            if (i >= len) {
+              fprintf (stderr, "ERROR: Unterminated color override in text: %s\n", text);
+              exit (EXIT_FAILURE);
+            }
+            temp[j++] = '&';
+            temp[j] = '\0';
+            i++;  // Move past terminating &
+            if (parse_color (temp, fo) != EXIT_SUCCESS) {
+              fprintf (stderr, "ERROR: Invalid color override '%s'.\n", temp);
+              exit (EXIT_FAILURE);
+            }
 
           // Font color off; overrides PrimaryColour style, if any.
           // Exit {} loop.
@@ -665,40 +749,49 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
 
           // Primary fill color override; not implemented in srt, so ignore it.
           } else if (strncmp (&text[i], "1c&H", 4) == 0) {
-            i += 5 + 6 + 1;  // Move past \1c&Hbbggrr&
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // Secondary fill color override; not implemented in srt, so ignore it.
-          } else if (strncmp (&text[i], "\\2c&H", 5) == 0) {
-            i += 4 + 6 + 1;  // Move past 2c&Hbbggrr&
+          } else if (strncmp (&text[i], "2c&H", 4) == 0) {
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // Border color override; not implemented in srt, so ignore it.
           } else if (strncmp (&text[i], "3c&H", 4) == 0) {
-            i += 4 + 6 + 1;  // Move past 3c&Hbbggrr&
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // Shadow color override; not implemented in srt, so ignore it.
           } else if (strncmp (&text[i], "4c&H", 4) == 0) {
-            i += 4 + 6 + 1;  // Move past 4c&Hbbggrr&
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // Alpha override; not implemented in srt, so ignore it.
           // Note that it is written "alpha" to differentiate from alignment formats.
           } else if (strncmp (&text[i], "alpha&H", 7) == 0) {
-            i += 7 + 2 + 1;  // Move past alpha&Haa&
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // Primary fill alpha override; not implemented in srt, so ignore it.
           } else if (strncmp (&text[i], "1a&H", 4) == 0) {
-            i += 4 + 2 + 1;  // Move past 1a&HFF&
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // Secondary fill alpha override; not implemented in srt, so ignore it.
           } else if (strncmp (&text[i], "2a&H", 4) == 0) {
-            i += 4 + 2 + 1;  // Move past 2a&HFF&
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // Border alpha override; not implemented in srt, so ignore it.
           } else if (strncmp (&text[i], "3a&H", 4) == 0) {
-            i += 4 + 2 + 1;  // Move past 3a&HFF&
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // Shadow alpha override; not implemented in srt, so ignore it.
           } else if (strncmp (&text[i], "4a&H", 4) == 0) {
-            i += 4 + 2 + 1;  // Move past 4a&HFF&
+            while ((i < len) && (text[i] != '&')) i++;
+            if (i < len) i++;
 
           // No more formats within current {}.
           } else if (text[i] == '}') {
@@ -710,16 +803,21 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
             i++;  /* Move past \   */
             continue;
 
-          // Unknown format encountered within {}.
+          // Unknown/unimplemented override format. Ignore it up to the next
+          // format separator or the end of the override block.
           } else {
-            fprintf (stderr, "Unknown SSA format encountered in text:\n");
-            fprintf (stderr, "%s\n", text);
-            exit (EXIT_FAILURE);
+            while ((i < len) && (text[i] != '\\') && (text[i] != '}')) i++;
           }
 
         }  // End for loop within {}
 
-      }  // End if SSA format found.
+      } else if ((text[i] == '{') || (text[i] == '\\')) {
+
+        // A literal brace/backslash that is not a recognized SSA escape or
+        // override must still be consumed; otherwise the loop would stall.
+        fputc (text[i], fo);
+        i++;
+      }
 
       // Regular text is found.
       while (i < len) {
@@ -764,22 +862,22 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
     // Align Style is in SSA format in srt file and does not need closure.
 
     // Close StrikeOut style, if enabled.
-    if (stylestrikeout[style] == -1) {
+    if (strikeoutstyle && (stylestrikeout[style] == -1)) {
       fprintf (fo, "</s>");
     }
     
     // Close Underline style, if enabled.
-    if (styleunderline[style] == -1) {
+    if (underlinestyle && (styleunderline[style] == -1)) {
       fprintf (fo, "</u>");
     }
 
     // Close Italic style, if enabled.
-    if (styleitalic[style] == -1) {
+    if (italicstyle && (styleitalic[style] == -1)) {
       fprintf (fo, "</i>");
     }
 
     // Close Bold style, if enabled.
-    if (stylebold[style] == -1) {
+    if (boldstyle && (stylebold[style] == -1)) {
       fprintf (fo, "</b>");
     }
 
@@ -795,17 +893,25 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
 
   fprintf (stdout, "%i subtitles found in SSA input file.\n\n", sub - 1);
 
-  // Close input and output files.
-  fclose (fi);
-  fclose (fo);
+  // Check output and close files.
+  if (ferror (fo)) {
+    fprintf (stderr, "ERROR: Failed while writing output file out.srt.\n");
+    exit (EXIT_FAILURE);
+  }
+  if (fclose (fi) != 0) {
+    fprintf (stderr, "ERROR: Unable to close input file %s.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+  if (fclose (fo) != 0) {
+    fprintf (stderr, "ERROR: Unable to close output file out.srt.\n");
+    exit (EXIT_FAILURE);
+  }
 
   // Free allocated memory.
   free (temp);
-  free (filename);
   free (string);
   free (text);
-  free (format);
-  for (i=0; i<MAXSTYLES; i++) {
+  for (i = 0; i < MAXSTYLES; i++) {
     free (stylename[i]);
     free (styleclr[i]);
   }
@@ -820,362 +926,365 @@ fprintf (stdout, "Number of Styles defined: %i\n", nstyles);
   return (EXIT_SUCCESS);
 }
 
-// Read a single line of text from a text file.
-// Returns -1 if EOF is encountered.
+// Read a single line of text from a subtitle/text file.
+// The terminating line-feed is retained when one is present in the input.
+// Carriage returns are discarded so LF and CRLF input are handled identically.
+//
+// Returns:
+//   0  - line successfully read
+//  -1  - EOF encountered before any characters were read
+//  -2  - line is too long for the supplied buffer
+//  -3  - invalid arguments or input error
 int
 readline (FILE *fi, char *line, int limit) {
 
-  int i, n;
+  int ch, i;
 
-  i = 0;  // i is pointer to byte in line.
-  while (i < limit) {
+  if ((fi == NULL) || (line == NULL) || (limit < 2)) {
+    return (-3);
+  }
 
-    // Grab next byte from file.
-    n = fgetc (fi);
+  i = 0;
+  for (;;) {
+
+    ch = fgetc (fi);
 
     // End of file reached.
-    // Tell calling function, by returning -1, that we're at end of file, so it won't call readline() again.
-    if (n == EOF) {
+    if (ch == EOF) {
 
-      // If there's no end of line at the end of the file, ensure string termination.
-      if (i > 0) {
-        line[i] = 0;
-        return (0);
+      // File stream error encountered.
+      if (ferror (fi)) {
+        line[0] = '\0';
+        return (-3);
       }
-      return (-1);
-    }
 
-    // Found a carriage return. Ignore it.
-    if (n == '\r') {
-      continue;
-    }
+      // No characters were read for this line.
+      if (i == 0) {
+        line[0] = '\0';
+        return (-1);
+      }
 
-    // Found a newline. Change to 0 for string termination.
-    // Break out of loop since this is the end of the current line.
-    if (n == '\n') {
-      line[i] = 0;  // Replace with 0 for string termination.
+      // Accept a final line that does not end with a line-feed.
+      line[i] = '\0';
       return (0);
     }
 
-    // Seems to be a valid character. Keep it.
-    line[i] = n;
-    i++;
+    // Ignore carriage returns so CRLF input is treated as LF input.
+    if (ch == '\r') {
+      continue;
+    }
+
+    // Found a line-feed. Retain it.
+    if (ch == '\n') {
+
+      // Line too long for supplied buffer.
+      if (i >= (limit - 1)) {
+        line[limit - 1] = '\0';
+        return (-2);
+      }
+
+      line[i++] = '\n';
+      line[i] = '\0';
+      return (0);
+    }
+
+    // Reserve one byte for the terminating null character. If the line is too
+    // long, discard the rest of the physical line so the next call starts at
+    // the beginning of the following line.
+    if (i >= (limit - 1)) {
+      line[limit - 1] = '\0';
+      while ((ch = fgetc (fi)) != '\n' && ch != EOF) {
+      }
+      if ((ch == EOF) && ferror (fi)) {
+        return (-3);
+      }
+      return (-2);
+    }
+
+    line[i++] = (char) ch;
+  }
+}
+
+// Read one SSA line and convert readline() errors into useful diagnostics.
+// EOF is returned to the caller because it is expected in several search loops.
+int
+read_ssa_line (FILE *fi, char *line, int limit, int *lineno) {
+
+  int status;
+
+  if (lineno == NULL) {
+    fprintf (stderr, "ERROR: Invalid line-number pointer in read_ssa_line().\n");
+    exit (EXIT_FAILURE);
   }
 
-  // Advance to next line.
-  n = 0;
-  while ((n != '\n') && (n != EOF)) {
-    n = fgetc (fi);
+  status = readline (fi, line, limit);
+  if (status == 0) {
+    (*lineno)++;
+    return (0);
+  }
+  if (status == -1) {
+    return (-1);
+  }
+  if (status == -2) {
+    fprintf (stderr, "ERROR: Line %i of the SSA file does not fit in the %d-byte input buffer.\n", *lineno + 1, limit);
+    exit (EXIT_FAILURE);
+  }
+
+  fprintf (stderr, "ERROR: Unable to read line %i of the SSA file.\n", *lineno + 1);
+  exit (EXIT_FAILURE);
+}
+
+// Find the zero-based index of an exact element in a comma-separated Format line.
+// Returns 0 if not found, 1 if found.
+int
+find_index (const char *text, const char *element, int *index) {
+
+  const char *p, *start, *end;
+  size_t elemlen, tokenlen;
+  int current;
+
+  if ((text == NULL) || (element == NULL) || (index == NULL)) return (0);
+
+  p = strchr (text, ':');
+  if (p == NULL) return (0);
+  p++;
+
+  elemlen = strlen (element);
+  current = 0;
+
+  while ((*p != '\0') && (*p != '\n')) {
+
+    while ((*p == ' ') || (*p == '\t')) p++;
+    start = p;
+
+    while ((*p != '\0') && (*p != '\n') && (*p != ',')) p++;
+    end = p;
+    while ((end > start) && ((end[-1] == ' ') || (end[-1] == '\t'))) end--;
+
+    tokenlen = (size_t) (end - start);
+    if ((tokenlen == elemlen) && (strncmp (start, element, elemlen) == 0)) {
+      *index = current;
+      return (1);
+    }
+
+    if (*p == ',') {
+      p++;
+      current++;
+    }
   }
 
   return (0);
 }
 
-// Find index of element within line of comma-separated text.
-// Returns 0 if not found, 1 if found.
+// Extract a string element from a comma-separated line, given its zero-based index.
+// If termination is '\n', the remainder of the physical line is returned; this is
+// used for the Text field because subtitle text may itself contain commas.
 int
-find_index (char *text, char *element, int *index) {
+extract_string (const char *text, int index, char termination, char *string) {
 
-  int i, j, len, elemlen, found;
+  const char *p, *start, *end;
+  size_t len;
+  int current;
 
-  len = strnlen (text, MAXLEN);
-  elemlen = strnlen (element, MAXLEN);
+  if ((text == NULL) || (string == NULL) || (index < 0)) return (EXIT_FAILURE);
 
-  // Find index.
-  found = 0;  // Default to element not found.
-  *index = 0;
-  i = 0;  // Index of temp
-  while (i < len) {
-    if (strncmp (&text[i], element, elemlen) == 0) {
-      found = 1;
-      break;
-    }
-    i++;
-  }  // End while
-  if (found) {
-    for (j=i; j>=0; j--) {
-      if (text[j] == ',') (*index)++;
-    }
-  }  // End if found
+  p = strchr (text, ':');
+  if (p == NULL) return (EXIT_FAILURE);
+  p++;
 
-  return (found);
-}
+  // Skip the conventional single space after "Format:", "Style:", etc.
+  if (*p == ' ') p++;
 
-// Extract a string element from a comma-separated line, given index.
-int
-extract_string (char *text, int index, char termination, char *string) {
-
-  int i, j, c, len;
-
-  len = strnlen (text, MAXLEN);
-
-  i = 0;  // Index of text
-
-  // Skip line title ("Format:", Dialogue:", etc.)
-  while (i < len) {
-    if (text[i] != ':') {
-      i++;
-    } else {
-      break;
-    }
-  }
-  i += 2;  // Move past ": "
-
-  // Locate element using index.
-  j = 0;  // Index of string
-  c = 0;  // Count of commas
-  while ((i < len) && (c < index)) {
-    if (text[i] == ',') c++;
-    i++;
+  current = 0;
+  while (current < index) {
+    p = strchr (p, ',');
+    if (p == NULL) return (EXIT_FAILURE);
+    p++;
+    current++;
   }
 
-  // Extract element until next comma or end of line is encountered.
-  memset (string, 0, MAXLEN * sizeof (char));
+  start = p;
+  end = start;
 
-  while (i < len) {
-    if ((text[i] != termination) && (text[i] != '\n')) {
-      string[j] = text[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
+  if (termination == '\n') {
+    while ((*end != '\0') && (*end != '\n')) end++;
+  } else {
+    while ((*end != '\0') && (*end != '\n') && (*end != termination)) end++;
   }
+
+  len = (size_t) (end - start);
+  if (len >= MAXLEN) return (EXIT_FAILURE);
+
+  memcpy (string, start, len);
+  string[len] = '\0';
 
   return (EXIT_SUCCESS);
 }
 
 // Extract an integer element from a comma-separated line, given index.
 int
-extract_int (char *text, int index, int *value) {
+extract_int (const char *text, int index, int *value) {
 
-  int i, j, c, len;
-  char *string, *endptr;
+  char string[MAXLEN];
+  char *endptr;
+  long parsed;
 
-  // Allocate memory for various arrays.
-  string = allocate_strmem (MAXLEN);
-
-  len = strnlen (text, MAXLEN);
-  
-  i = 0;  // Index of text
-
-  // Skip line title ("Format:", Dialogue:", etc.)
-  while (i < len) {
-    if (text[i] != ':') {
-      i++;
-    } else {
-      break;
-    }
-  }
-  i += 2;  // Move past ": "
-  
-  // Locate element using index.
-  j = 0;  // Index of string
-  c = 0;  // Count of commas
-  while ((i < len) && (c < index)) {
-    if (text[i] == ',') c++;
-    i++;
-  }
-
-  // Extract element until next comma is encountered.
-  memset (string, 0, MAXLEN * sizeof (char));
-
-  while (i < len) {
-    if (text[i] != ',') {
-      string[j] = text[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
-  }
+  if ((text == NULL) || (value == NULL)) return (EXIT_FAILURE);
+  if (extract_string (text, index, ',', string) != EXIT_SUCCESS) return (EXIT_FAILURE);
 
   errno = 0;
-  (*value) = (int) strtol (string, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-    fprintf (stderr, "ERROR: Cannot make integer of string: %s\n", string);
-    exit (EXIT_FAILURE);
+  parsed = strtol (string, &endptr, 10);
+  if ((errno == ERANGE) || (endptr == string)) return (EXIT_FAILURE);
+
+  while (isspace ((unsigned char) *endptr)) endptr++;
+  if ((*endptr != '\0') || (parsed < INT_MIN) || (parsed > INT_MAX)) {
+    return (EXIT_FAILURE);
   }
 
-  // Free allocated memory.
-  free (string);
+  *value = (int) parsed;
+  return (EXIT_SUCCESS);
+}
+
+// Parse a timestamp in SSA/ASS form h:mm:ss.cc.
+// The seconds parser also accepts one or three fractional digits and converts
+// the result to milliseconds for SubRip output.
+int
+parse_time (const char *string, int *hh, int *mm, int *ss, int *ms) {
+
+  const char *p;
+  char *endptr;
+  long hours, minutes;
+  double seconds;
+  long total_in_minute;
+
+  if ((string == NULL) || (hh == NULL) || (mm == NULL) ||
+      (ss == NULL) || (ms == NULL)) {
+    return (EXIT_FAILURE);
+  }
+
+  p = string;
+
+  errno = 0;
+  hours = strtol (p, &endptr, 10);
+  if ((errno == ERANGE) || (endptr == p) || (*endptr != ':') ||
+      (hours < 0) || (hours > INT_MAX)) {
+    return (EXIT_FAILURE);
+  }
+  p = endptr + 1;
+
+  errno = 0;
+  minutes = strtol (p, &endptr, 10);
+  if ((errno == ERANGE) || (endptr == p) || (*endptr != ':') ||
+      (minutes < 0) || (minutes > 59)) {
+    return (EXIT_FAILURE);
+  }
+  p = endptr + 1;
+
+  errno = 0;
+  seconds = strtod (p, &endptr);
+  if ((errno == ERANGE) || (endptr == p) || !isfinite (seconds) ||
+      (seconds < 0.0) || (seconds >= 60.0)) {
+    return (EXIT_FAILURE);
+  }
+
+  while (isspace ((unsigned char) *endptr)) endptr++;
+  if (*endptr != '\0') return (EXIT_FAILURE);
+
+  // Round to the nearest millisecond, then normalize a possible carry.
+  total_in_minute = lround (seconds * 1000.0);
+  if (total_in_minute >= 60000L) {
+    total_in_minute -= 60000L;
+    minutes++;
+    if (minutes == 60) {
+      minutes = 0;
+      hours++;
+      if (hours > INT_MAX) return (EXIT_FAILURE);
+    }
+  }
+
+  *hh = (int) hours;
+  *mm = (int) minutes;
+  *ss = (int) (total_in_minute / 1000L);
+  *ms = (int) (total_in_minute % 1000L);
 
   return (EXIT_SUCCESS);
 }
 
-// Parse string containing timestamp in SSA format.
+// Parse an SSA/ASS color definition and write the equivalent SubRip font tag.
+// Hexadecimal colors are BGR (&HBBGGRR) or ABGR (&HAABBGGRR). Decimal
+// values are interpreted as the same 32-bit ABGR representation; negative
+// decimal values are accepted using their two's-complement 32-bit form.
 int
-parse_time (char *string, int *hh, int *mm, int *ss, int *ms) {
+parse_color (const char *string, FILE *fo) {
 
-  int i, j, len;
-  double dsec, integral, fractional;
-  char *temp, *endptr;
+  char digits[9];
+  const char *p, *end;
+  char *endptr;
+  size_t ndigits;
+  unsigned long hexvalue;
+  long long decimal;
+  uint32_t value;
+  unsigned int r, g, b;
 
-  temp = allocate_strmem (MAXLEN);
+  if ((string == NULL) || (fo == NULL)) return (EXIT_FAILURE);
 
-  len = strnlen (string, MAXLEN);
+  while (isspace ((unsigned char) *string)) string++;
+  if (*string == '\0') return (EXIT_FAILURE);
 
-  i = 0;  // Index of string
+  if ((string[0] == '&') && ((string[1] == 'H') || (string[1] == 'h'))) {
 
-  // Extract hours.
-  j = 0;  // Index of temp
-  while (i < len) {
-    if (string[i] != ':') {
-      temp[j] = string[i];
-      i++;
-      j++;
-    } else {
-      break;
+    p = string + 2;
+    end = p;
+    while (isxdigit ((unsigned char) *end)) end++;
+    ndigits = (size_t) (end - p);
+
+    if ((ndigits != 6U) && (ndigits != 8U)) return (EXIT_FAILURE);
+
+    while (isspace ((unsigned char) *end)) end++;
+    if (*end == '&') {
+      end++;
+      while (isspace ((unsigned char) *end)) end++;
     }
-  }
-  errno = 0;
-  *hh = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-    fprintf (stderr, "ERROR: Cannot make integer of string: %s\n", temp);
-    fprintf (stderr, "       %s\n", string);
-    exit (EXIT_FAILURE);
-  }
-  i++;
+    if (*end != '\0') return (EXIT_FAILURE);
 
-  // Extract minutes.
-  memset (temp, 0, MAXLEN * sizeof (char));
-  j = 0;  // Index of temp
-  while (i < len) {
-    if (string[i] != ':') {
-      temp[j] = string[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
-  }
-  errno = 0;
-  *mm = (int) strtol (temp, &endptr, 10);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-    fprintf (stderr, "ERROR: Cannot make integer of string: %s\n", temp);
-    fprintf (stderr, "       %s\n", string);
-    exit (EXIT_FAILURE);
-  }
-  i++;
+    memcpy (digits, p, ndigits);
+    digits[ndigits] = '\0';
 
-  // Extract seconds and milliseconds.
-  memset (temp, 0, MAXLEN * sizeof (char));
-  j = 0;  // Index of temp
-  while (i < len) {
-    if (string[i] != ',') {
-      temp[j] = string[i];
-      i++;
-      j++;
-    } else {
-      break;
-    }
-  }
-  errno = 0;
-  dsec = strtod (temp, &endptr);
-  if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-    fprintf (stderr, "ERROR: Cannot make double of string: %s\n", temp);
-    fprintf (stderr, "       %s\n", string);
-    exit (EXIT_FAILURE);
-  }
-  fractional = modf (dsec, &integral);
-  *ms = (int) ((fractional * 1000.0) + 0.0001);
-  *ss = (int) integral;
-
-  // Free allocated memory.
-  free (temp);
-
-  return (EXIT_SUCCESS);
-}
-
-// Parse string containing color definition.
-// Color definition is extracted as string because format color values are expressed in decimal or hexadecimal.
-//   Hexadecimal:
-//     BGR format as &HBBGGRR& or ABGR (with alpha channel) as &HAABBGGRR&. 
-//   Decimal:
-//     - Convert to Hexadecimal: e.g., The decimal value 65535 converts to hex as 0000FFFF.
-//     - Extract Color Components:
-//     - Alpha (A): The first two characters (00), indicating fully transparent.
-//     - Blue (B): The next two characters (00), indicating no blue.
-//     - Green (G): The next two characters (FF), indicating full green.
-//     - Red (R): The last two characters (FF), indicating full red.
-//     - Combining these components, the color represented by 65535 is a fully opaque yellow (since red + green = yellow).
-int
-parse_color (char *string, FILE *fo) {
-
-  int i, c, dec, len;
-  char *hexstring, *endptr;
-
-  // Allocate memory for various arrays.
-  hexstring = allocate_strmem (MAXLEN);
-
-  len = strnlen (string, MAXLEN);
-
-  fprintf (fo, "<font color=\"#");
-
-  // Hexadecimal format.
-  if (strncmp (string, "&H", 2) == 0) {
-
-    i = 2;  // Index of string; skip &H
-    c = 0;
-    while (i < len) {
-      if (string[i] != '&') {
-        c++;  // Count digits
-        i++;
-      } else {
-        break;
-      }
-    }
-
-    // Hexadecimal BGR format.
-    i = 0;  // Index of string;
-    if (c == 6) {
-      i += 2;  // Move past &H
-
-    // Hexadecimal ABGR format.
-    // Ignore alpha since it isn't implemented in SubRip format.
-    } else if (c == 8) { 
-      i += 4;  // Move past &HAA
-
-    } else {  
-      fprintf (stderr, "ERROR: Unknown color definition: %s\n", string);
-      exit (EXIT_FAILURE);
-            
-    }  // End if BGR or ABGR
-
-    // Extract as RGB for SubRip.
-    fprintf (fo, "%c", string[i+4]);  // R left-digit
-    fprintf (fo, "%c", string[i+5]);  // R right-digit
-    fprintf (fo, "%c", string[i+2]);  // G left-digit
-    fprintf (fo, "%c", string[i+3]);  // G right-digit
-    fprintf (fo, "%c", string[i]);    // B left-digit
-    fprintf (fo, "%c", string[i+1]);  // B right-digit
-    fprintf (fo, "\">");
-
-  // Decimal format.
-  } else {
-    i = 0;  // Index of string
     errno = 0;
-    dec = (int) strtol (string, &endptr, 10);
-    if ((errno == ERANGE) || (errno == EINVAL) || (endptr == string)) {
-      fprintf (stderr, "ERROR: Cannot make integer of string: %s\n", string);
-      exit (EXIT_FAILURE);
+    hexvalue = strtoul (digits, &endptr, 16);
+    if ((errno == ERANGE) || (*endptr != '\0') || (hexvalue > UINT32_MAX)) {
+      return (EXIT_FAILURE);
     }
-    sprintf (hexstring, "%08X", dec);  // As hexadecimal ABGR format.
+    value = (uint32_t) hexvalue;
 
-    // Extract as RGB for SubRip.
-    i += 2;  // Ignore alpha since it isn't implemented in SubRip format.
-    fprintf (fo, "%c", hexstring[i+4]);  // R left-digit
-    fprintf (fo, "%c", hexstring[i+5]);  // R right-digit
-    fprintf (fo, "%c", hexstring[i+2]);  // G left-digit
-    fprintf (fo, "%c", hexstring[i+3]);  // G right-digit
-    fprintf (fo, "%c", hexstring[i]);    // B left-digit
-    fprintf (fo, "%c", hexstring[i+1]);  // B right-digit
-    fprintf (fo, "\">");
+  } else {
 
-  }  // End if hexadecimal or decimal color definition
+    errno = 0;
+    decimal = strtoll (string, &endptr, 10);
+    if ((errno == ERANGE) || (endptr == string)) return (EXIT_FAILURE);
 
-  // Free allocated memory.
-  free (hexstring);
+    while (isspace ((unsigned char) *endptr)) endptr++;
+    if (*endptr != '\0') return (EXIT_FAILURE);
+
+    if ((decimal < (long long) INT32_MIN) || (decimal > (long long) UINT32_MAX)) {
+      return (EXIT_FAILURE);
+    }
+
+    if (decimal < 0) {
+      value = (uint32_t) (int32_t) decimal;
+    } else {
+      value = (uint32_t) decimal;
+    }
+  }
+
+  // SSA/ASS stores BGR in the low 24 bits.
+  r = (unsigned int) (value & UINT32_C (0xff));
+  g = (unsigned int) ((value >> 8) & UINT32_C (0xff));
+  b = (unsigned int) ((value >> 16) & UINT32_C (0xff));
+
+  if (fprintf (fo, "<font color=\"#%02X%02X%02X\">", r, g, b) < 0) {
+    return (EXIT_FAILURE);
+  }
 
   return (EXIT_SUCCESS);
 }
@@ -1192,7 +1301,7 @@ fix_text (char *text) {
   // Allocate memory for various arrays.
   temp = allocate_strmem (MAXLEN);
 
-  len = strnlen (text, MAXLEN);
+  len = (int) strlen (text);
 
   // Whitespace is not allowed between < and tag name, and </ and tag name.
   i = 0;  // Index of text
@@ -1251,71 +1360,68 @@ fix_text (char *text) {
   memset (text, 0, MAXLEN * sizeof (char));
   memcpy (text, temp, MAXLEN * sizeof (char));
 
-  // Free allocae memory.
+  // Free allocated memory.
   free (temp);
 
   return (EXIT_SUCCESS);
 }
 
-// Allocate memory for an array of chars.
+// Allocate zero-initialized memory for an array of chars.
 char *
 allocate_strmem (int len) {
 
-  void *tmp;
+  char *tmp;
 
   if (len <= 0) {
     fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
+  tmp = calloc ((size_t) len, sizeof (*tmp));
+  if (tmp == NULL) {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
     exit (EXIT_FAILURE);
   }
+
+  return (tmp);
 }
 
-// Allocate memory for an array of pointers to arrays of chars.
+// Allocate zero-initialized memory for an array of pointers to chars.
 char **
 allocate_strmemp (int len) {
-    
-  void *tmp;
-    
+
+  char **tmp;
+
   if (len <= 0) {
     fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmemp().\n", len);
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char **) malloc (len * sizeof (char *));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char *));
-    return (tmp);
-  } else {
+  tmp = calloc ((size_t) len, sizeof (*tmp));
+  if (tmp == NULL) {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmemp().\n");
     exit (EXIT_FAILURE);
   }
+
+  return (tmp);
 }
 
-// Allocate memory for an array of ints.
+// Allocate zero-initialized memory for an array of ints.
 int *
 allocate_intmem (int len) {
 
-  void *tmp;
+  int *tmp;
 
   if (len <= 0) {
     fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_intmem().\n", len);
     exit (EXIT_FAILURE);
   }
 
-  tmp = (int *) malloc (len * sizeof (int));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (int));
-    return (tmp);
-  } else {
+  tmp = calloc ((size_t) len, sizeof (*tmp));
+  if (tmp == NULL) {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_intmem().\n");
     exit (EXIT_FAILURE);
   }
+
+  return (tmp);
 }

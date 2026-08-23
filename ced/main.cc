@@ -14,65 +14,85 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <iostream>
-#include <string> 
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "compact_enc_det.h"
 
 // Function prototypes
-char *allocate_strmem (int);
-int *enc_name (int);
-
-// Symbolic constants
-#define TEXT_STRING_LEN 256  // Maximum number of characters in a line of text.
+char *allocate_strmem (size_t);
+int enc_name (Encoding);
 
 int
 main (int argc, char **argv) {
 
-  char *filein;
-  char* text;
+  char *text;
   bool is_reliable;
-  int nbytes, n, i, bytes_consumed;
+  int bytes_consumed, nbytes;
+  long file_size;
+  size_t nread;
   FILE *fi;
 
-  filein = allocate_strmem (TEXT_STRING_LEN);
-
   // Process the command line arguments, if any.
-  if (argc == 2) {
-    strncpy (filein, argv[1], TEXT_STRING_LEN);
-  } else {
+  if (argc != 2) {
     fprintf (stdout, "\nUsage: ./ced inputfilename\n\n");
-    exit (EXIT_SUCCESS);
+    return (EXIT_SUCCESS);
   }
 
   // Open input file if it exists.
-  fi = fopen (filein, "rb");
+  fi = fopen (argv[1], "rb");
   if (fi == NULL) {
-    fprintf (stderr, "ERROR: Input file %s does not exist.\n", filein);
-    exit (EXIT_FAILURE);
+    fprintf (stderr, "ERROR: Unable to open input file %s.\n", argv[1]);
+    return (EXIT_FAILURE);
   }
 
-  // Count number of bytes in file.
-  nbytes = 0;
-  while ((n = fgetc (fi)) != EOF) {
-    nbytes++;
+  // Determine the size of the input file. DetectEncoding() takes the input
+  // length as an int, so reject files that cannot be represented safely.
+  if (fseek (fi, 0L, SEEK_END) != 0) {
+    fprintf (stderr, "ERROR: Unable to seek to the end of input file %s.\n", argv[1]);
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
+
+  file_size = ftell (fi);
+  if (file_size < 0) {
+    fprintf (stderr, "ERROR: Unable to determine the size of input file %s.\n", argv[1]);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+  if (file_size > INT_MAX) {
+    fprintf (stderr, "ERROR: Input file %s is too large for CED.\n", argv[1]);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+
+  nbytes = (int) file_size;
   rewind (fi);
 
-  // Allocate memory for the file's contents.
-  text = allocate_strmem (nbytes);
+  // Allocate one extra byte and leave it zero-filled. CED itself does not
+  // require a terminating NUL because the explicit byte count is passed to
+  // DetectEncoding(), but the extra byte makes the buffer safe to inspect as
+  // a C string while debugging.
+  text = allocate_strmem ((size_t) nbytes + 1);
 
-  // Read file contents.
-  for (i=0; i<nbytes; i++) {
-    text[i] = fgetc (fi);
+  // Read the complete file, including any embedded NUL bytes.
+  nread = fread (text, 1, (size_t) nbytes, fi);
+  if (nread != (size_t) nbytes) {
+    fprintf (stderr, "ERROR: Unable to read complete input file %s.\n", argv[1]);
+    fclose (fi);
+    free (text);
+    return (EXIT_FAILURE);
   }
 
   // Close input file.
   fclose (fi);
 
-  // Detemine the most probable character-encoding for the file.
+  // Determine the most probable character encoding for the file. Pass the
+  // actual byte count rather than strlen(), since CED is designed to examine
+  // arbitrary raw bytes and an input file may contain embedded NUL bytes.
   Encoding encoding = CompactEncDet::DetectEncoding(
-    text, strlen(text),
+    text, nbytes,
     nullptr, nullptr, nullptr,
     UNKNOWN_ENCODING,
     UNKNOWN_LANGUAGE,
@@ -81,14 +101,15 @@ main (int argc, char **argv) {
     &bytes_consumed,
     &is_reliable);
 
-  enc_name (encoding);
-//  std::cout << encoding << "\n";
+  if (enc_name (encoding) != EXIT_SUCCESS) {
+    free (text);
+    return (EXIT_FAILURE);
+  }
 
   printf ("bytes consumed: %i\n", bytes_consumed);
   printf ("Is reliable?: %s\n", is_reliable ? "true" : "false");
 
   // Free allocated memory.
-  free (filein);
   free (text);
 
   return (EXIT_SUCCESS);
@@ -96,12 +117,12 @@ main (int argc, char **argv) {
 
 // Allocate memory for an array of chars.
 char *
-allocate_strmem (int len) {
+allocate_strmem (size_t len) {
 
   char *tmp;
 
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
+  if (len == 0) {
+    fprintf (stderr, "ERROR: Cannot allocate zero bytes in allocate_strmem().\n");
     exit (EXIT_FAILURE);
   }
 

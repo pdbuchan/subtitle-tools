@@ -1,4 +1,4 @@
-/*  Copyright (C) 2024-2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2024-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -23,9 +23,11 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>  // uint8_t
+#include <stdint.h>
 #include <string.h>
 #include <errno.h>
+#include <ctype.h>
+#include <limits.h>
 
 // Definition of structs
 typedef struct {
@@ -63,7 +65,8 @@ BOM *allocate_bommem (int);
 int
 main (int argc, char **argv) {
 
-  int i, type, flag, alllines, nlines, line, nsubs, *number, sub, *ntext, nwarn;
+  int i, type, flag, alllines, nlines, line, nsubs, *number, status, sub, *ntext, nwarn;
+  long parsed_number;
   char *filename, **input, *temp, ***text, *endptr;
   BOM *bom;
   TIME *start, *end;
@@ -88,7 +91,11 @@ main (int argc, char **argv) {
 
   // Process the command line arguments, if any.
   if (argc == 2) {
-    strncpy (filename, argv[1], MAXLEN);
+    if (snprintf (filename, MAXLEN, "%s", argv[1]) >= MAXLEN) {
+      fprintf (stderr, "\nERROR: Input filename is too long.\n");
+      free (filename);
+      return (EXIT_FAILURE);
+    }
   
   } else {
     fprintf (stdout, "\nUsage: ./check inputfilename.srt\n");
@@ -128,9 +135,25 @@ main (int argc, char **argv) {
 
   // Count lines of input SubRip file.
   alllines = 0;  // Count of lines
-  while (readline (fi, temp, MAXLEN) != -1) {
+  for (;;) {
+    status = readline (fi, temp, MAXLEN);
+    if (status == -1) break;
+    if (status == -2) {
+      fprintf (stderr, "\nERROR: Line %i does not fit in the %i-byte input buffer.\n", alllines + 1, MAXLEN);
+      exit (EXIT_FAILURE);
+    }
+    if (status == -3) {
+      fprintf (stderr, "\nERROR: Unable to read input SubRip file %s.\n", filename);
+      exit (EXIT_FAILURE);
+    }
     alllines++;
   }
+
+  if (alllines == 0) {
+    fprintf (stderr, "\nERROR: Input SubRip file %s is empty.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
   fprintf (stdout, "\n%i lines found including any excess trailing line-feeds.\n", alllines);
   rewind (fi);
 
@@ -142,14 +165,44 @@ main (int argc, char **argv) {
 
   // Read input SubRip file into array input.
   for (line=0; line<alllines; line++) {
-    if (readline (fi, input[line], MAXLEN) == -1) {
-      fprintf (stderr, "\nERROR: Cannot read line %i from input SubRip file %s.\n", line + 1, filename);
+    status = readline (fi, input[line], MAXLEN);
+    if (status == -1) {
+      fprintf (stderr, "\nERROR: Unexpected end of input while reading line %i from %s.\n", line + 1, filename);
+      exit (EXIT_FAILURE);
+    }
+    if (status == -2) {
+      fprintf (stderr, "\nERROR: Line %i does not fit in the %i-byte input buffer.\n", line + 1, MAXLEN);
+      exit (EXIT_FAILURE);
+    }
+    if (status == -3) {
+      fprintf (stderr, "\nERROR: Unable to read line %i from input SubRip file %s.\n", line + 1, filename);
       exit (EXIT_FAILURE);
     }
   }  // Next line
 
   // Close input file.
   fclose (fi);
+
+  // Detect any Byte Order Mark (BOM) at beginning of first line and remove it if detected.
+  type = byteordermark (input[0], bom);
+  if (type < 0) {
+    fprintf (stdout, "\nNo known Byte Order Mark (BOM) found in %s.\n", filename);
+  } else {
+    fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
+
+    // This program parses SRT syntax byte-by-byte. UTF-16, UTF-32, and the
+    // other BOM-marked encodings listed above require character decoding first.
+    if (type != 0) {
+      fprintf (stderr, "ERROR: This program can directly parse only UTF-8 or byte-compatible text input.\n");
+      fprintf (stderr, "       Convert %s input to UTF-8 before checking it.\n", bom[type].name);
+      exit (EXIT_FAILURE);
+    }
+
+    memset (temp, 0, MAXLEN * sizeof (char));
+    strncpy (temp, &input[0][bom[type].len], MAXLEN);
+    memset (input[0], 0, MAXLEN * sizeof (char));
+    strncpy (input[0], temp, MAXLEN);
+  }
 
   // Remove excess line-feeds at end of array input.
   nlines = alllines;
@@ -167,18 +220,6 @@ main (int argc, char **argv) {
     exit (EXIT_FAILURE);
   } else {
     fprintf (stdout, "%i lines found excluding excess trailing line-feeds.\n", nlines);
-  }
-
-  // Detect any Byte Order Mark (BOM) at beginning of first line and remove it if detected.
-  type = byteordermark (input[0], bom);
-  if (type < 0) {
-    fprintf (stdout, "\nNo known Byte Order Mark (BOM) found in %s.\n", filename);
-  } else {
-    fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
-    memset (temp, 0, MAXLEN * sizeof (char));
-    strncpy (temp, &input[0][bom[type].len], MAXLEN);
-    memset (input[0], 0, MAXLEN * sizeof (char));
-    strncpy (input[0], temp, MAXLEN);
   }
 
   // Check for more than one line-feed between subtitles.
@@ -235,22 +276,44 @@ main (int argc, char **argv) {
   sub = 0;  // Subtitle index
   for (line=0; line<nlines; line++) {
 
-    // Examine subtitle number.
-    errno = 0;
-    number[sub] = (int) strtol (input[line], &endptr, 10);
-    if ((errno == ERANGE) || (errno == EINVAL) || (endptr == input[line])) {
-      fprintf (stderr, "\nERROR: Cannot make integer of subtitle number.\n");
-      fprintf (stderr, "\n%s", input[line]);
-      fprintf (stderr, "%s\n", input[line + 1]);
+    if (sub >= nsubs) {
+      fprintf (stderr, "\nERROR: Internal subtitle count mismatch.\n");
       exit (EXIT_FAILURE);
     }
-    if ((input[line][0] < '0') || (input[line][0] > '9')) {
+
+    // Examine subtitle number.
+    if (input[line][0] == '\n') {
+      fprintf (stderr, "\nERROR: Missing subtitle number on line %i.\n", line + 1);
+      exit (EXIT_FAILURE);
+    }
+    if (!isdigit ((unsigned char) input[line][0])) {
       fprintf (stderr, "\nERROR: Subtitle number has leading non-numeric character(s).\n");
       fprintf (stderr, "\n%s", input[line]);
-      fprintf (stderr, "%s\n", input[line + 1]);
       exit (EXIT_FAILURE);
     }
+
+    errno = 0;
+    parsed_number = strtol (input[line], &endptr, 10);
+    if ((errno == ERANGE) || (endptr == input[line]) ||
+        (parsed_number < 0) || (parsed_number > INT_MAX)) {
+      fprintf (stderr, "\nERROR: Cannot make integer of subtitle number.\n");
+      fprintf (stderr, "\n%s", input[line]);
+      exit (EXIT_FAILURE);
+    }
+
+    while ((*endptr == ' ') || (*endptr == '\t')) endptr++;
+    if ((*endptr != '\n') && (*endptr != '\0')) {
+      fprintf (stderr, "\nERROR: Subtitle number contains trailing non-numeric character(s).\n");
+      fprintf (stderr, "\n%s", input[line]);
+      exit (EXIT_FAILURE);
+    }
+    number[sub] = (int) parsed_number;
     line++;
+
+    if ((line >= nlines) || (input[line][0] == '\n')) {
+      fprintf (stderr, "\nERROR: Missing timestamp for subtitle %i.\n", number[sub]);
+      exit (EXIT_FAILURE);
+    }
 
     // Check format and extract start and end times for current subtitle.
     extract_time (input[line], &start[sub], &end[sub]);
@@ -266,6 +329,11 @@ main (int argc, char **argv) {
 
       // Copy line of text from current subtitle.
       if (input[line][0] != '\n') {
+        if (ntext[sub] >= MAXLINES) {
+          fprintf (stderr, "\nERROR: Subtitle %i contains more than %i lines of text.\n",
+                   number[sub], MAXLINES);
+          exit (EXIT_FAILURE);
+        }
         strncpy (text[sub][ntext[sub]], input[line], MAXLEN);
         ntext[sub]++;
       } else {
@@ -376,15 +444,15 @@ main (int argc, char **argv) {
   free (filename);
   free (start);
   free (end);
-  for (sub=0; sub<nsubs; sub++) {
-    for (i=0; i<MAXLINES; i++) {
+  for (sub = 0; sub < nsubs; sub++) {
+    for (i = 0; i < MAXLINES; i++) {
       free (text[sub][i]);
     }
     free (text[sub]);
   }
   free (text);
   free (ntext);
-  for (line=0; line<alllines; line++) {
+  for (line = 0; line < alllines; line++) {
     free (input[line]);
   }
   free (input);
@@ -393,55 +461,84 @@ main (int argc, char **argv) {
   return (EXIT_SUCCESS);
 }
 
-// Read a single line of text from a text file.
-// Returns -1 if EOF is encountered.
+// Read a single line of text from a subtitle/text file.
+// The terminating line-feed is retained when one is present in the input.
+// Carriage returns are discarded so LF and CRLF input are handled identically.
+//
+// Returns:
+//   0  - line successfully read
+//  -1  - EOF encountered before any characters were read
+//  -2  - line is too long for the supplied buffer
+//  -3  - invalid arguments or input error
 int
 readline (FILE *fi, char *line, int limit) {
 
-  int i, n;
+  int ch, i;
 
-  i = 0;  // i is pointer to byte in line.
-  while (i < limit) {
+  if ((fi == NULL) || (line == NULL) || (limit < 2)) {
+    return (-3);
+  }
 
-    // Grab next byte from file.
-    n = fgetc (fi);
+  i = 0;
+  for (;;) {
+
+    ch = fgetc (fi);
 
     // End of file reached.
-    // Tell calling function, by returning -1, that we're at end of file, so it won't call readline() again.
-    if (n == EOF) {
+    if (ch == EOF) {
 
-      // If there's no end of line at the end of the file, add a line-feed.
-      if (i > 0) {
-        line[i] = '\n';
-        return (0);
+      // File stream error encountered.
+      if (ferror (fi)) {
+        line[0] = '\0';
+        return (-3);
       }
-      return (-1);
-    }
 
-    // Found a carriage return. Ignore it.
-    if (n == '\r') {
-      continue;
-    }
+      // No characters were read for this line.
+      if (i == 0) {
+        line[0] = '\0';
+        return (-1);
+      }
 
-    // Seems to be a valid character. Keep it.
-    line[i] = n;
-    i++;
-
-    // Found a newline.
-    // Break out of loop since this is the end of the current line.
-    if (n == '\n') {
+      // Accept a final line that does not end with a line-feed.
+      line[i] = '\0';
       return (0);
     }
 
-  }
+    // Ignore carriage returns so CRLF input is treated as LF input.
+    if (ch == '\r') {
+      continue;
+    }
 
-  // Advance to next line.
-  n = 0;
-  while ((n != '\n') && (n != EOF)) {
-    n = fgetc (fi);
-  }
+    // Found a line-feed. Retain it because the subtitle tools use a line
+    // containing only '\n' to identify the blank line between subtitles.
+    if (ch == '\n') {
 
-  return (0);
+      // Line too long for supplied buffer.
+      if (i >= (limit - 1)) {
+        line[limit - 1] = '\0';
+        return (-2);
+      }
+
+      line[i++] = '\n';
+      line[i] = '\0';
+      return (0);
+    }
+
+    // Reserve one byte for the terminating null character. If the line is too
+    // long, discard the rest of the physical line so the next call starts at
+    // the beginning of the following line.
+    if (i >= (limit - 1)) {
+      line[limit - 1] = '\0';
+      while ((ch = fgetc (fi)) != '\n' && ch != EOF) {
+      }
+      if ((ch == EOF) && ferror (fi)) {
+        return (-3);
+      }
+      return (-2);
+    }
+
+    line[i++] = (char) ch;
+  }
 }
 
 // Detect Byte Order Mark (BOM), if it exists, at beginning of line.
@@ -450,22 +547,31 @@ readline (FILE *fi, char *line, int limit) {
 int
 byteordermark (char *text, BOM *bom) {
 
-  int type, i, found;
+  int type, i, found, best, bestlen;
 
-  // Loop through all types of Byte Order Marks.
+  best = -1;
+  bestlen = 0;
+
+  // Loop through all types of Byte Order Marks. Keep the longest matching BOM
+  // because some shorter BOMs are prefixes of longer ones (e.g., UTF-16 LE is
+  // a prefix of UTF-32 LE).
   for (type=0; type<MAXBOM; type++) {
 
     found = 1;  // Default to current type detected.
     for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) found = 0;
+      if ((uint8_t) text[i] != bom[type].sequence[i]) {
+        found = 0;
+        break;
+      }
     }
 
-    // We found a match.
-    if (found) return (type);
+    if (found && (bom[type].len > bestlen)) {
+      best = type;
+      bestlen = bom[type].len;
+    }
   }
 
-  // Failed to find a match.
-  return (-1);
+  return (best);
 }
 
 // Extract and parse start and end timestamps.
@@ -570,6 +676,11 @@ parsetimestamp (char *timestamp, TIME *time) {
     fprintf (stderr, "       %s\n", timestamp);
     exit (EXIT_FAILURE);
   }
+  if ((time->m < 0) || (time->m > 59)) {
+    fprintf (stderr, "ERROR: Minutes are outside valid range 00-59: %s\n", xx);
+    fprintf (stderr, "       %s\n", timestamp);
+    exit (EXIT_FAILURE);
+  }
 
   // Seconds
   memset (xx, 0, 3 * sizeof (char));
@@ -578,6 +689,11 @@ parsetimestamp (char *timestamp, TIME *time) {
   time->s = (int) strtol (xx, &endptr, 10);
   if ((errno == ERANGE) || (errno == EINVAL) || (endptr == xx)) {
     fprintf (stderr, "ERROR: Cannot make integer of seconds: %s\n", xx);
+    fprintf (stderr, "       %s\n", timestamp);
+    exit (EXIT_FAILURE);
+  }
+  if ((time->s < 0) || (time->s > 59)) {
+    fprintf (stderr, "ERROR: Seconds are outside valid range 00-59: %s\n", xx);
     fprintf (stderr, "       %s\n", timestamp);
     exit (EXIT_FAILURE);
   }
@@ -607,9 +723,9 @@ parsetimestamp (char *timestamp, TIME *time) {
 int
 timetoms (TIME *time) {
 
-  time->totalms = time->h * 60 * 60 * 1000;
-  time->totalms += time->m * 60 * 1000;
-  time->totalms += time->s * 1000;
+  time->totalms = (int64_t) time->h * 60 * 60 * 1000;
+  time->totalms += (int64_t) time->m * 60 * 1000;
+  time->totalms += (int64_t) time->s * 1000;
   time->totalms += time->ms;
     
   return (EXIT_SUCCESS);
@@ -626,9 +742,8 @@ allocate_intmem (int len) {
     exit (EXIT_FAILURE);
   }
 
-  tmp = (int *) malloc (len * sizeof (int));
+  tmp = calloc ((size_t) len, sizeof (int));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (int));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_intmem().\n");
@@ -647,9 +762,8 @@ allocate_strmem (int len) {
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
+  tmp = calloc ((size_t) len, sizeof (char));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
@@ -668,9 +782,8 @@ allocate_strmemp (int len) {
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char **) malloc (len * sizeof (char *));
+  tmp = calloc ((size_t) len, sizeof (char *));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char *));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmemp().\n");
@@ -689,9 +802,8 @@ allocate_strmempp (int len) {
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char ***) malloc (len * sizeof (char *));
+  tmp = calloc ((size_t) len, sizeof (char **));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char *));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmempp().\n");
@@ -710,9 +822,8 @@ allocate_timemem (int len) {
     exit (EXIT_FAILURE);
   } 
     
-  tmp = (TIME *) malloc (len * sizeof (TIME));
+  tmp = calloc ((size_t) len, sizeof (TIME));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (TIME));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_timemem().\n");
@@ -731,9 +842,8 @@ allocate_bommem (int len) {
     exit (EXIT_FAILURE);
   }
     
-  tmp = (BOM *) malloc (len * sizeof (BOM));
+  tmp = calloc ((size_t) len, sizeof (BOM));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (BOM));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_bommem().\n");

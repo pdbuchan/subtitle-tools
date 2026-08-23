@@ -16,30 +16,21 @@
 
 #include "sub.h"
 
-// Write a unsigned little-endian 16-bit value to file.
 void
 write_u16_le (FILE *fo, uint16_t val) {
-
-    fputc (val & 0xff, fo);
-    fputc ((val >> 8) & 0xff, fo);
-
+  fputc ((int) (val & UINT16_C(0xff)), fo);
+  fputc ((int) ((val >> 8) & UINT16_C(0xff)), fo);
 }
 
-// Write a unsigned little-endian 32-bit value to file.
 void
 write_u32_le (FILE *fo, uint32_t val) {
-
-    fputc (val & 0xff, fo);
-    fputc ((val >> 8) & 0xff, fo);
-    fputc ((val >> 16) & 0xff, fo);
-    fputc ((val >> 24) & 0xff, fo);
-
+  fputc ((int) (val & UINT32_C(0xff)), fo);
+  fputc ((int) ((val >> 8) & UINT32_C(0xff)), fo);
+  fputc ((int) ((val >> 16) & UINT32_C(0xff)), fo);
+  fputc ((int) ((val >> 24) & UINT32_C(0xff)), fo);
 }
 
-// Write a signed little-endian 32-bit value to file.
 void
 write_s32_le (FILE *fo, int32_t val) {
-
-    write_u32_le (fo, (uint32_t) val);  // Cast as unsigned in order to preserve bit pattern.
-
+  write_u32_le (fo, (uint32_t) val);
 }

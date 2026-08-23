@@ -1,10 +1,10 @@
-/*  Copyright (C) 2024-2025 P. David Buchan (pdbuchan@gmail.com)
+/*  Copyright (C) 2024-2026 P. David Buchan (pdbuchan@gmail.com)
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    
+
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -15,508 +15,676 @@
 */
 
 // tag.c - Take formatting tags from one SubRip (.srt) file and text from another SubRip file and create a new SubRip file.
-//         If a Byte Order Mark (BOM) exists in the SubRip file containing the desired text, it will be included in the output file.
-//         NOTE: The two .srt files must have same number of subtitles and same number of lines per subtitle.
-//               Since text will likely be different between srt files, tag.c only works for opening tags that appear at the
-//               beginning of a line and closing tags that appear at the end of a line.
+//         If a UTF-8 Byte Order Mark (BOM) exists in the SubRip file containing the desired text, it will be included in the output file.
+//         NOTE: The two .srt files must have the same number of subtitles and the same number of text lines per subtitle.
+//               Since text will likely be different between srt files, tag.c only transfers opening tags that appear at the
+//               beginning of a line and closing tags that appear at the end of a line. Position tags at the beginning are also copied.
 
-// gcc -Wall tag.c -o tag
+// gcc -std=c11 -Wall -Wextra -Wpedantic tag.c -o tag
 
 // Run without command line arguments to see usage notes.
 // Output: out.srt
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>  // uint8_t
+#include <stdint.h>
 #include <string.h>
+#include <errno.h>
+#include <ctype.h>
 
 // Definition of structs
 typedef struct {
-  int len;
-  char *name;
-  uint8_t *sequence;
+  size_t len;
+  const char *name;
+  const uint8_t *sequence;
 } BOM;
 
+typedef struct {
+  size_t number_line;
+  size_t timestamp_line;
+  size_t text_start;
+  size_t ntext;
+} SUBTITLE;
+
 // Function prototypes
-int readline (FILE*, char*, int);
-int byteordermark (char *, BOM *);
-void copytags (FILE *, char *, int *);
-int *allocate_intmem (int);
-char *allocate_strmem (int);
-char **allocate_strmemp (int);
-BOM *allocate_bommem (int);
+int readline (FILE *, char *, int);
+int byteordermark (const uint8_t *, size_t, const BOM *);
+char **read_file (const char *, const BOM *, int *, size_t *, size_t *);
+SUBTITLE *parse_subtitles (char **, size_t, const char *, size_t *);
+int valid_subtitle_number (const char *);
+int write_tagged_line (FILE *, const char *, const char *);
+void output_error (FILE *);
+char *allocate_strmem (size_t);
+char **allocate_strmemp (size_t);
+SUBTITLE *allocate_subtitlemem (size_t);
 
 // Set some symbolic constants.
-#define MAXLEN 256  // Maximum number of characters per line
-#define MAXBOM 11  // Maximum number of Byte Order Mark (BOM) types
+#define MAXLEN 256  // Maximum number of characters per physical line
+#define MAXBOM 11   // Number of Byte Order Mark (BOM) types
 
 int
 main (int argc, char **argv) {
 
-  int i, type, alllinestag, alllinestext, nlinestag, nlinestext, line, nsubs, sub, *ntext, tagpos, textpos;
-  char *temp, *tagfilename, *textfilename, **inputtag, **inputtext;
-  BOM *bom;
-  FILE *fi,*fo;
+  size_t i, line, alllinestag, alllinestext, nlinestag, nlinestext;
+  size_t nsubstag, nsubstext;
+  int tagtype, texttype;
+  char **inputtag, **inputtext;
+  SUBTITLE *tag_sub, *text_sub;
+  FILE *fo;
 
   // Byte Order Mark (BOM) names and sequences.
-  char name[MAXBOM][30] = {"UTF-8", "UTF-16 (BE)", "UTF-16 (LE)", "UTF-32 (BE)", "UTF-32 (LE)", "UTF-7", "UTF-1", "UTF-EBCDIC", "SCSU", "BOCU-1", "GB18030"};
-  uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
-  uint8_t utf16be[2]    = {0xfe, 0xff};
-  uint8_t utf16le[2]    = {0xff, 0xfe};
-  uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
-  uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
-  uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
-  uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
-  uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
-  uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
-  uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
-  uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
+  static const uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
+  static const uint8_t utf16be[2]    = {0xfe, 0xff};
+  static const uint8_t utf16le[2]    = {0xff, 0xfe};
+  static const uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
+  static const uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
+  static const uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
+  static const uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
+  static const uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
+  static const uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
+  static const uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
+  static const uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
+  static const BOM bom[MAXBOM] = {
+    {3u, "UTF-8",        utf8},
+    {2u, "UTF-16 (BE)",  utf16be},
+    {2u, "UTF-16 (LE)",  utf16le},
+    {4u, "UTF-32 (BE)",  utf32be},
+    {4u, "UTF-32 (LE)",  utf32le},
+    {3u, "UTF-7",        utf7},
+    {3u, "UTF-1",        utf1},
+    {4u, "UTF-EBCDIC",   utfebcdic},
+    {3u, "SCSU",         scsu},
+    {3u, "BOCU-1",       bocu1},
+    {4u, "GB18030",      gb18030}
+  };
 
-  // Allocate memory for various arrays.
-  tagfilename = allocate_strmem (MAXLEN);
-  textfilename = allocate_strmem (MAXLEN);
-
-  // Process the command line arguments, if any.
-  if (argc == 3) {
-    strncpy (tagfilename, argv[1], MAXLEN);
-    strncpy (textfilename, argv[2], MAXLEN);
-
-  } else {
+  if (argc != 3) {
     fprintf (stdout, "\nUsage: ./tag taginputfilename.srt textinputfilename.srt\n");
     fprintf (stdout, "       Output filename will be out.srt.\n\n");
-    free (tagfilename);
-    free (textfilename);
     return (EXIT_SUCCESS);
   }
 
-  // Allocate memory for various arrays.
-  temp = allocate_strmem (MAXLEN);
-  bom = allocate_bommem (MAXBOM);
+  // Read and validate the two SubRip files. The UTF-8 BOM, if present, is
+  // removed from the first logical line before parsing. Other BOM-marked
+  // encodings are rejected because the parser is byte-oriented.
+  inputtag = read_file (argv[1], bom, &tagtype, &alllinestag, &nlinestag);
+  inputtext = read_file (argv[2], bom, &texttype, &alllinestext, &nlinestext);
 
-  // Populate array with Byte Order Mark data.
-  bom[0].len = 3;    bom[0].name = name[0];    bom[0].sequence = utf8;
-  bom[1].len = 2;    bom[1].name = name[1];    bom[1].sequence = utf16be;
-  bom[2].len = 2;    bom[2].name = name[2];    bom[2].sequence = utf16le;
-  bom[3].len = 4;    bom[3].name = name[3];    bom[3].sequence = utf32be;
-  bom[4].len = 4;    bom[4].name = name[4];    bom[4].sequence = utf32le;
-  bom[5].len = 3;    bom[5].name = name[5];    bom[5].sequence = utf7;
-  bom[6].len = 3;    bom[6].name = name[6];    bom[6].sequence = utf1;
-  bom[7].len = 4;    bom[7].name = name[7];    bom[7].sequence = utfebcdic;
-  bom[8].len = 3;    bom[8].name = name[8];    bom[8].sequence = scsu;
-  bom[9].len = 3;    bom[9].name = name[9];    bom[9].sequence = bocu1;
-  bom[10].len = 4;   bom[10].name = name[10];  bom[10].sequence = gb18030;
-
-  // Open existing srt file with desired formatting tags.
-  fi = fopen (tagfilename, "r");
-  if (fi == NULL) {
-    fprintf (stderr, "ERROR: Unable to open input srt file %s with desired formatting.\n", tagfilename);
-    exit (EXIT_FAILURE);
-  }
-
-  // Count lines of input SubRip file.
-  alllinestag = 0;  // Count of lines
-  while (readline (fi, temp, MAXLEN) != -1) {
-    alllinestag++;
-  }
-  fprintf (stdout, "\n%s: %i lines found including any excess trailing line-feeds.\n", tagfilename, alllinestag);
-  rewind (fi);
-
-  // Allocate memory for array to hold input file.
-  inputtag = allocate_strmemp (alllinestag);
-  for (line=0; line<alllinestag; line++) {
-    inputtag[line] = allocate_strmem (MAXLEN);
-  }
-
-  // Read input SubRip file into array input.
-  for (line=0; line<alllinestag; line++) {
-    if (readline (fi, inputtag[line], MAXLEN) == -1) {
-      fprintf (stderr, "\nERROR: Cannot read line %i from input SubRip file %s.\n", line + 1, tagfilename);
-      exit (EXIT_FAILURE);
-    }
-  }  // Next line
-
-  // Close input file.
-  fclose (fi);
-
-  // Remove excess line-feeds at end of array input.
-  nlinestag = alllinestag;
-  for (line=alllinestag; line>1; line--) {
-    if ((inputtag[line - 1][0] == '\n') && (inputtag[line - 2][0] == '\n')) {
-      nlinestag--;
-    } else {
-      break;
-    }
-  }
-  fprintf (stdout, "%s: %i lines found excluding trailing line-feeds.\n", tagfilename, nlinestag);
-
-  // Open existing srt file with desired text.
-  fi = fopen (textfilename, "r");
-  if (fi == NULL) {
-    fprintf (stderr, "ERROR: Unable to open input srt file %s with desired text.\n", textfilename);
-    exit (EXIT_FAILURE);
-  }
-
-  // Count lines of input SubRip file.
-  alllinestext = 0;  // Count of lines
-  while (readline (fi, temp, MAXLEN) != -1) {
-    alllinestext++;
-  }
-  fprintf (stdout, "\n%s: %i lines found including any excess trailing line-feeds.\n", textfilename, alllinestext);
-  rewind (fi);
-
-  // Allocate memory for array to hold input file.
-  inputtext = allocate_strmemp (alllinestext);
-  for (line=0; line<alllinestext; line++) {
-    inputtext[line] = allocate_strmem (MAXLEN);
-  }
-
-  // Read input SubRip file into array input.
-  for (line=0; line<alllinestext; line++) {
-    if (readline (fi, inputtext[line], MAXLEN) == -1) {
-      fprintf (stderr, "\nERROR: Cannot read line %i from input SubRip file %s.\n", line + 1, textfilename);
-      exit (EXIT_FAILURE);
-    }
-  }  // Next line
-
-  // Close input file.
-  fclose (fi);
-
-  // Remove excess line-feeds at end of array input.
-  nlinestext = alllinestext;
-  for (line=alllinestext; line>1; line--) {
-    if ((inputtext[line - 1][0] == '\n') && (inputtext[line - 2][0] == '\n')) {
-      nlinestext--;
-    } else {
-      break;
-    }
-  }
-  fprintf (stdout, "%s: %i lines found excluding trailing line-feeds.\n", textfilename, nlinestext);
-
-  // Detect any Byte Order Mark (BOM) at beginning of first line of SubRip file with desired text.
-  type = byteordermark (inputtext[0], bom);
-  if (type < 0) {
-    fprintf (stdout, "%s: No known Byte Order Mark (BOM) found.\n", textfilename);
+  fprintf (stdout, "\n%s: %zu lines found including any excess trailing line-feeds.\n", argv[1], alllinestag);
+  fprintf (stdout, "%s: %zu lines found excluding excess trailing line-feeds.\n", argv[1], nlinestag);
+  if (tagtype < 0) {
+    fprintf (stdout, "%s: No known Byte Order Mark (BOM) found.\n", argv[1]);
   } else {
-    fprintf (stdout, "%s: Byte Order Mark (BOM) detected for character encoding type: %s\n", textfilename, bom[type].name);
+    fprintf (stdout, "%s: Byte Order Mark (BOM) detected for character encoding type: %s\n", argv[1], bom[tagtype].name);
   }
 
-  // Count number of subtitles in SubRip file with desired formatting tags; assume at least one.
-  nsubs = 0;
-  for (line=0; line<nlinestag; line++) {
+  fprintf (stdout, "\n%s: %zu lines found including any excess trailing line-feeds.\n", argv[2], alllinestext);
+  fprintf (stdout, "%s: %zu lines found excluding excess trailing line-feeds.\n", argv[2], nlinestext);
+  if (texttype < 0) {
+    fprintf (stdout, "%s: No known Byte Order Mark (BOM) found.\n", argv[2]);
+  } else {
+    fprintf (stdout, "%s: Byte Order Mark (BOM) detected for character encoding type: %s\n", argv[2], bom[texttype].name);
+  }
 
-    nsubs++;
+  tag_sub = parse_subtitles (inputtag, nlinestag, argv[1], &nsubstag);
+  text_sub = parse_subtitles (inputtext, nlinestext, argv[2], &nsubstext);
 
-    // Advance through to next subtitle number, if there is one.
-    // End of current subtitle is demarcated by a line containing only a line-feed.
-    while (inputtag[line][0] != '\n') {
-      line++;
-      if (line == nlinestag) break;
-    }
+  fprintf (stdout, "\n%zu subtitles found in %s.\n", nsubstag, argv[1]);
+  fprintf (stdout, "%zu subtitles found in %s.\n\n", nsubstext, argv[2]);
 
-  }  // Next sub
-  fprintf (stdout, "\n%i subtitles found in %s.\n", nsubs, tagfilename);
-
-  // Count number of subtitles in SubRip file with desired text; assume at least one.
-  i = 0;
-  for (line=0; line<nlinestext; line++) {
-
-    i++;
-
-    // Advance through to next subtitle number, if there is one.
-    // End of current subtitle is demarcated by a line containing only a line-feed.
-    while (inputtext[line][0] != '\n') {
-      line++;
-      if (line == nlinestext) break;
-    }
-
-  }  // Next sub
-  fprintf (stdout, "\n%i subtitles found in %s.\n\n", i, textfilename);
-  if (i != nsubs) {
-    fprintf (stderr, "ERROR: Files %s and %s have different numbers of subtitles.\n", tagfilename, textfilename);
+  if (nsubstag != nsubstext) {
+    fprintf (stderr, "ERROR: Files %s and %s have different numbers of subtitles.\n", argv[1], argv[2]);
     exit (EXIT_FAILURE);
   }
 
-  // Allocate memory for various arrays.
-  ntext = allocate_intmem (nsubs);  // Number of lines of text per subtitle
-
-  // Count number of lines of text for each subtitle by examining the formatted srt file.
-  line = 0;  // Line index of formatted srt file
-  for (sub=0; sub<nsubs; sub++) {
-
-    // Skip sub number and timestamp.
-    line += 2;
-
-    // Count number of lines of text for current subtitle.
-    ntext[sub] = 0;
-    while (inputtag[line][0] != '\n') {
-      ntext[sub]++;
-      line++;
-      if (line == nlinestag) break;
+  // The transfer is line-oriented, so corresponding subtitles must contain
+  // the same number of text lines.
+  for (i=0; i<nsubstag; i++) {
+    if (tag_sub[i].ntext != text_sub[i].ntext) {
+      fprintf (stderr, "ERROR: Subtitle %zu has %zu text line%s in %s but %zu text line%s in %s.\n", i + 1u, tag_sub[i].ntext, (tag_sub[i].ntext == 1u) ? "" : "s", argv[1], text_sub[i].ntext, (text_sub[i].ntext == 1u) ? "" : "s", argv[2]);
+      exit (EXIT_FAILURE);
     }
-
-    line++;  // Skip line-feed
-
-  }  // Next sub
-
-  // Open output file.
-  fo = fopen ("out.srt", "r");
-  if (fo != NULL) {
-    fprintf (stderr, "ERROR: Output out.srt file already exists.\n");
-    exit (EXIT_FAILURE);
   }
-  fo = fopen ("out.srt", "w");
+
+  // Create output exclusively so an existing file cannot be overwritten.
+  errno = 0;
+  fo = fopen ("out.srt", "wbx");
   if (fo == NULL) {
-    fprintf (stderr, "ERROR: Unable to open output file out.srt.\n");
+    if (errno == EEXIST) {
+      fprintf (stderr, "ERROR: Output file out.srt already exists.\n");
+    } else {
+      fprintf (stderr, "ERROR: Unable to create output file out.srt.\n");
+    }
     exit (EXIT_FAILURE);
   }
 
-  // Write Byte Order Mark (BOM) to output file if detected in input file.
-  if (type != -1) {
-    fwrite (bom[type].sequence, bom[type].len * sizeof (uint8_t), 1, fo);
+  // The output encoding follows the file supplying the desired text.
+  if (texttype == 0) {
+    if (fwrite (bom[0].sequence, 1u, bom[0].len, fo) != bom[0].len) {
+      output_error (fo);
+    }
   }
 
-  i = 0;  // Line index of SubRip files.
-  // Loop through all subs.
-  for (sub=0; sub<nsubs; sub++) {
+  for (i=0; i<nsubstag; i++) {
 
-    // Write sub number to output file.
-    fprintf (fo, "%i\n", sub + 1);
-    i++;  // Next line
+    // Renumber subtitles consecutively.
+    if (fprintf (fo, "%zu\n", i + 1u) < 0) {
+      output_error (fo);
+    }
 
-    // Copy timestamp to output file.
-    fprintf (fo, "%s", inputtext[i]);
-    i++;  // Next line
+    // Timestamps come from the file supplying the desired text.
+    if (fputs (inputtext[text_sub[i].timestamp_line], fo) == EOF) {
+      output_error (fo);
+    }
 
-    // Loop through all lines of text for current subtitle.
-    for (line=0; line<ntext[sub]; line++) {
-
-      // Copy opening tags at beginning of line, if present.
-      tagpos = 0;  // Character index of line of formatted srt file.
-      if (inputtag[i][tagpos] == '<') {
-        copytags (fo, inputtag[i], &tagpos);  // Recursively copy all immediately adjacent tags.
+    // Transfer beginning/end tags from each corresponding formatted line to
+    // the desired text line.
+    for (line=0; line<tag_sub[i].ntext; line++) {
+      if (write_tagged_line (fo, inputtag[tag_sub[i].text_start + line], inputtext[text_sub[i].text_start + line]) != EXIT_SUCCESS) {
+        output_error (fo);
       }
+    }
 
-      // Copy text from text.srt file; don't include line-feed.
-      for (textpos=0; textpos < strnlen (inputtext[i], MAXLEN); textpos++) {
-        if (inputtext[i][textpos] == '\n') break;
-        fputc (inputtext[i][textpos], fo);
-      }
+    if (fputc ('\n', fo) == EOF) {
+      output_error (fo);
+    }
+  }
 
-      // Look for closing tag or end of formatted line.
-      while (tagpos < strnlen (inputtag[i], MAXLEN)) {
-
-        // Found tag(s); copy them to output file.
-        if (inputtag[i][tagpos] == '<') {
-          copytags (fo, inputtag[i], &tagpos);  // Recursively copy all immediately adjacent tags.
-        } else {
-          tagpos++;
-        }
-
-      }  // Next char in formatted line
-
-      // Next line
-      i++;
-      fprintf (fo, "\n");
-
-    }  // Next line of text of current subtitle
-
-    // End of sub line-feed
-    fprintf (fo, "\n");
-    i++;  // Next line
-
-  }  // Next sub
-
-  // Close output file.
-  fclose (fo);
+  if (fclose (fo) != 0) {
+    remove ("out.srt");
+    fprintf (stderr, "ERROR: Unable to close output file out.srt successfully.\n");
+    exit (EXIT_FAILURE);
+  }
 
   // Free allocated memory.
-  free (temp);
-  free (bom);
-  free (ntext);
-  free (tagfilename);
-  free (textfilename);
-  for (line=0; line<alllinestag; line++) {
+  for (line = 0; line < alllinestag; line++) {
     free (inputtag[line]);
   }
   free (inputtag);
-  for (line=0; line<alllinestext; line++) {
+
+  for (line = 0; line < alllinestext; line++) {
     free (inputtext[line]);
   }
   free (inputtext);
+  free (tag_sub);
+  free (text_sub);
 
   return (EXIT_SUCCESS);
 }
 
-// Recursively copy all adjacent tags starting at position pos to output file.
-void
-copytags (FILE *fo, char *string, int *pos) {
+// Read a SubRip/text file into memory using the common subtitle readline()
+// semantics. Return the total physical line count and a logical line count in
+// which excess trailing blank lines have been removed while retaining one
+// closing blank line.
+char **
+read_file (const char *filename, const BOM *bom, int *type, size_t *alllines, size_t *nlines) {
 
-  while ((*pos) < strnlen (string, MAXLEN)) {
+  int status;
+  size_t line, len, nread;
+  uint8_t prefix[4] = {0u, 0u, 0u, 0u};
+  char temp[MAXLEN];
+  char **input;
+  FILE *fi;
 
-    fputc (string[*pos], fo);
-    (*pos)++;
-    
-    if (string[(*pos) - 1] == '>') break;
+  if ((filename == NULL) || (bom == NULL) || (type == NULL) ||
+      (alllines == NULL) || (nlines == NULL)) {
+    fprintf (stderr, "ERROR: Invalid argument supplied to read_file().\n");
+    exit (EXIT_FAILURE);
   }
 
-  if (string[*pos] == '<') copytags (fo, string, pos);
+  fi = fopen (filename, "rb");
+  if (fi == NULL) {
+    fprintf (stderr, "ERROR: Unable to open input SubRip file %s.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
+  // Inspect at most the first four bytes before line-oriented parsing.
+  nread = fread (prefix, 1u, sizeof (prefix), fi);
+  if (ferror (fi)) {
+    fclose (fi);
+    fprintf (stderr, "ERROR: Unable to read input SubRip file %s.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
+  *type = byteordermark (prefix, nread, bom);
+  if ((*type >= 0) && (*type != 0)) {
+    fclose (fi);
+    fprintf (stderr, "ERROR: Input file %s uses %s encoding.\n", filename, bom[*type].name);
+    fprintf (stderr, "       This byte-oriented program requires UTF-8 or an unmarked compatible single-byte encoding.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  rewind (fi);
+  if (ferror (fi)) {
+    fclose (fi);
+    fprintf (stderr, "ERROR: Unable to rewind input SubRip file %s.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
+  // First pass: count physical lines and handle every readline() status.
+  *alllines = 0u;
+  for (;;) {
+    status = readline (fi, temp, MAXLEN);
+    if (status == 0) {
+      (*alllines)++;
+    } else if (status == -1) {
+      break;
+    } else if (status == -2) {
+      fclose (fi);
+      fprintf (stderr, "ERROR: Line %zu in %s does not fit in the %d-byte input buffer.\n",
+               *alllines + 1u, filename, MAXLEN);
+      exit (EXIT_FAILURE);
+    } else {
+      fclose (fi);
+      fprintf (stderr, "ERROR: Unable to read line %zu from input SubRip file %s.\n",
+               *alllines + 1u, filename);
+      exit (EXIT_FAILURE);
+    }
+  }
+
+  if (*alllines == 0u) {
+    fclose (fi);
+    fprintf (stderr, "ERROR: Input SubRip file %s is empty.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
+  rewind (fi);
+  if (ferror (fi)) {
+    fclose (fi);
+    fprintf (stderr, "ERROR: Unable to rewind input SubRip file %s.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
+  input = allocate_strmemp (*alllines);
+  for (line=0; line<*alllines; line++) {
+    input[line] = allocate_strmem (MAXLEN);
+  }
+
+  // Second pass: load each line and again distinguish every return value.
+  for (line=0; line<*alllines; line++) {
+    status = readline (fi, input[line], MAXLEN);
+    if (status != 0) {
+      fclose (fi);
+      if (status == -1) {
+        fprintf (stderr, "ERROR: Unexpected end of file while reading line %zu from %s.\n", line + 1u, filename);
+      } else if (status == -2) {
+        fprintf (stderr, "ERROR: Line %zu in %s does not fit in the %d-byte input buffer.\n", line + 1u, filename, MAXLEN);
+      } else {
+        fprintf (stderr, "ERROR: Unable to read line %zu from input SubRip file %s.\n", line + 1u, filename);
+      }
+      exit (EXIT_FAILURE);
+    }
+  }
+
+  if (fclose (fi) != 0) {
+    fprintf (stderr, "ERROR: Unable to close input SubRip file %s successfully.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
+  // Remove the UTF-8 BOM from the first logical line. It is written back only
+  // if this is the text file chosen as the source of output encoding.
+  if (*type == 0) {
+    len = strlen (input[0]);
+    if (len < bom[0].len) {
+      fprintf (stderr, "ERROR: Invalid UTF-8 BOM in input file %s.\n", filename);
+      exit (EXIT_FAILURE);
+    }
+    memmove (input[0], input[0] + bom[0].len, len - bom[0].len + 1u);
+  }
+
+  // Remove excess trailing blank lines while retaining the one that closes
+  // the final subtitle.
+  *nlines = *alllines;
+  while ((*nlines > 1u) &&
+         (input[*nlines - 1u][0] == '\n') &&
+         (input[*nlines - 2u][0] == '\n')) {
+    (*nlines)--;
+  }
+
+  return (input);
 }
 
-// Read a single line of text from a text file.
-// Returns -1 if EOF is encountered.
+// Validate SubRip block structure and record where each subtitle's fields are
+// located. Subtitle numbers are not preserved, but validating them catches a
+// shifted or otherwise malformed input structure before indexing it.
+SUBTITLE *
+parse_subtitles (char **input, size_t nlines, const char *filename, size_t *nsubs) {
+
+  size_t pos, count, capacity;
+  SUBTITLE *subs, *grown;
+
+  if ((input == NULL) || (filename == NULL) || (nsubs == NULL) || (nlines == 0u)) {
+    fprintf (stderr, "ERROR: Invalid argument supplied to parse_subtitles().\n");
+    exit (EXIT_FAILURE);
+  }
+
+  if (input[nlines - 1u][0] != '\n') {
+    fprintf (stderr, "ERROR: Final subtitle in %s is not closed by a blank line.\n", filename);
+    exit (EXIT_FAILURE);
+  }
+
+  capacity = 16u;
+  subs = allocate_subtitlemem (capacity);
+  count = 0u;
+  pos = 0u;
+
+  while (pos < nlines) {
+
+    if (input[pos][0] == '\n') {
+      fprintf (stderr, "ERROR: Unexpected blank line at line %zu in %s.\n", pos + 1u, filename);
+      exit (EXIT_FAILURE);
+    }
+
+    if (!valid_subtitle_number (input[pos])) {
+      fprintf (stderr, "ERROR: Invalid subtitle number at line %zu in %s: %s", pos + 1u, filename, input[pos]);
+      if (strchr (input[pos], '\n') == NULL) fputc ('\n', stderr);
+      exit (EXIT_FAILURE);
+    }
+
+    if (count == capacity) {
+      if (capacity > (SIZE_MAX / 2u)) {
+        fprintf (stderr, "ERROR: Too many subtitles in %s.\n", filename);
+        exit (EXIT_FAILURE);
+      }
+      capacity *= 2u;
+      grown = realloc (subs, capacity * sizeof (*subs));
+      if (grown == NULL) {
+        fprintf (stderr, "ERROR: Unable to enlarge subtitle index array.\n");
+        exit (EXIT_FAILURE);
+      }
+      subs = grown;
+    }
+
+    subs[count].number_line = pos;
+    pos++;
+
+    if ((pos >= nlines) || (input[pos][0] == '\n')) {
+      fprintf (stderr, "ERROR: Missing timestamp line for subtitle %zu in %s.\n", count + 1u, filename);
+      exit (EXIT_FAILURE);
+    }
+    if (strstr (input[pos], " --> ") == NULL) {
+      fprintf (stderr, "ERROR: Malformed timestamp line for subtitle %zu in %s: %s", count + 1u, filename, input[pos]);
+      if (strchr (input[pos], '\n') == NULL) fputc ('\n', stderr);
+      exit (EXIT_FAILURE);
+    }
+
+    subs[count].timestamp_line = pos;
+    pos++;
+    subs[count].text_start = pos;
+    subs[count].ntext = 0u;
+
+    while ((pos < nlines) && (input[pos][0] != '\n')) {
+      subs[count].ntext++;
+      pos++;
+    }
+
+    if (pos >= nlines) {
+      fprintf (stderr, "ERROR: Subtitle %zu in %s is not closed by a blank line.\n", count + 1u, filename);
+      exit (EXIT_FAILURE);
+    }
+
+    // Consume exactly one separator. If another blank line follows internally,
+    // it will be diagnosed as an unexpected blank line at the next iteration.
+    pos++;
+    count++;
+  }
+
+  *nsubs = count;
+  return (subs);
+}
+
+// Return nonzero if line contains a positive decimal subtitle number and no
+// other non-whitespace characters.
+int
+valid_subtitle_number (const char *line) {
+
+  const unsigned char *p;
+  int have_digit;
+
+  if (line == NULL) return (0);
+
+  p = (const unsigned char *) line;
+  while ((*p == ' ') || (*p == '\t')) p++;
+
+  have_digit = 0;
+  while (isdigit (*p)) {
+    have_digit = 1;
+    p++;
+  }
+  if (!have_digit) return (0);
+
+  while ((*p == ' ') || (*p == '\t')) p++;
+  return ((*p == '\n') || (*p == '\0'));
+}
+
+// Write one desired text line bracketed by formatting taken from the
+// corresponding formatted line. Only opening tags immediately at the start and
+// closing HTML-style tags immediately at the end are transferred. This follows
+// the documented limitation of tag.c and deliberately ignores inline tags.
+int
+write_tagged_line (FILE *fo, const char *tagline, const char *textline) {
+
+  size_t taglen, textlen, pos, end, lt, suffix;
+
+  if ((fo == NULL) || (tagline == NULL) || (textline == NULL)) return (EXIT_FAILURE);
+
+  taglen = strlen (tagline);
+  if ((taglen > 0u) && (tagline[taglen - 1u] == '\n')) taglen--;
+
+  textlen = strlen (textline);
+  if ((textlen > 0u) && (textline[textlen - 1u] == '\n')) textlen--;
+
+  // Copy adjacent opening HTML tags and SSA/ASS-style position/override blocks
+  // from the beginning of the formatted line.
+  pos = 0u;
+  while (pos < taglen) {
+    if ((tagline[pos] == '<') && ((pos + 1u >= taglen) || (tagline[pos + 1u] != '/'))) {
+      end = pos + 1u;
+      while ((end < taglen) && (tagline[end] != '>')) end++;
+      if (end >= taglen) return (EXIT_FAILURE);
+      if (fwrite (tagline + pos, 1u, end - pos + 1u, fo) != (end - pos + 1u)) return (EXIT_FAILURE);
+      pos = end + 1u;
+    } else if ((tagline[pos] == '{') && (pos + 1u < taglen) && (tagline[pos + 1u] == '\\')) {
+      end = pos + 2u;
+      while ((end < taglen) && (tagline[end] != '}')) end++;
+      if (end >= taglen) return (EXIT_FAILURE);
+      if (fwrite (tagline + pos, 1u, end - pos + 1u, fo) != (end - pos + 1u)) return (EXIT_FAILURE);
+      pos = end + 1u;
+    } else {
+      break;
+    }
+  }
+
+  if ((textlen > 0u) && (fwrite (textline, 1u, textlen, fo) != textlen)) return (EXIT_FAILURE);
+
+  // Find the first tag in a chain of closing tags at the very end of the
+  // formatted line, preserving their original order and nesting.
+  suffix = taglen;
+  end = taglen;
+  while ((end > pos) && (tagline[end - 1u] == '>')) {
+    lt = end - 1u;
+    while ((lt > pos) && (tagline[lt] != '<')) lt--;
+    if ((tagline[lt] != '<') || (lt + 1u >= end) || (tagline[lt + 1u] != '/')) break;
+    suffix = lt;
+    end = lt;
+  }
+
+  if ((suffix < taglen) &&
+      (fwrite (tagline + suffix, 1u, taglen - suffix, fo) != (taglen - suffix))) {
+    return (EXIT_FAILURE);
+  }
+
+  if (fputc ('\n', fo) == EOF) return (EXIT_FAILURE);
+  return (EXIT_SUCCESS);
+}
+
+// Handle an output failure consistently and remove a partial output file.
+void
+output_error (FILE *fo) {
+
+  if (fo != NULL) fclose (fo);
+  remove ("out.srt");
+  fprintf (stderr, "ERROR: Unable to write output file out.srt. Partial output was removed.\n");
+  exit (EXIT_FAILURE);
+}
+
+// Read a single line of text from a subtitle/text file.
+// The terminating line-feed is retained when one is present in the input.
+// Carriage returns are discarded so LF and CRLF input are handled identically.
+//
+// Returns:
+//   0  - line successfully read
+//  -1  - EOF encountered before any characters were read
+//  -2  - line is too long for the supplied buffer
+//  -3  - invalid arguments or input error
 int
 readline (FILE *fi, char *line, int limit) {
 
-  int i, n;
+  int ch, i;
 
-  i = 0;  // i is pointer to byte in line.
-  while (i < limit) {
+  if ((fi == NULL) || (line == NULL) || (limit < 2)) {
+    return (-3);
+  }
 
-    // Grab next byte from file.
-    n = fgetc (fi);
+  i = 0;
+  for (;;) {
 
-    // End of file reached.
-    // Tell calling function, by returning -1, that we're at end of file, so it won't call readline() again.
-    if (n == EOF) {
+    ch = fgetc (fi);
 
-      // If there's no end of line at the end of the file, ensure string termination.
-      if (i > 0) {
-        line[i] = 0;
-        return (0);
+    if (ch == EOF) {
+      if (ferror (fi)) {
+        line[0] = '\0';
+        return (-3);
       }
-      return (-1);
-    }
 
-    // Found a carriage return. Ignore it.
-    if (n == '\r') {
-      continue;
-    }
+      if (i == 0) {
+        line[0] = '\0';
+        return (-1);
+      }
 
-    // Seems to be a valid character. Keep it.
-    line[i] = n;
-    i++;
-
-    // Found a newline. Change to 0 for string termination.
-    // Break out of loop since this is the end of the current line.
-    if (n == '\n') {
+      line[i] = '\0';
       return (0);
     }
 
-  }
-
-  // Advance to next line.
-  n = 0;
-  while ((n != '\n') && (n != EOF)) {
-    n = fgetc (fi);
-  }
-
-  return (0);
-}
-
-// Detect Byte Order Mark (BOM), if it exists, at beginning of line.
-// Return index of bom array corresponding to type of BOM detected,
-// or return -1 if none (or unlisted type) detected.
-int
-byteordermark (char *text, BOM *bom) {
-
-  int type, i, found;
-
-  // Loop through all types of Byte Order Marks.
-  for (type=0; type<MAXBOM; type++) {
-
-    found = 1;  // Default to current type detected.
-    for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) found = 0;
+    if (ch == '\r') {
+      continue;
     }
 
-    // We found a match.
-    if (found) return (type);
-  }
+    if (ch == '\n') {
+      if (i >= (limit - 1)) {
+        line[limit - 1] = '\0';
+        return (-2);
+      }
 
-  // Failed to find a match.
-  return (-1);
+      line[i++] = '\n';
+      line[i] = '\0';
+      return (0);
+    }
+
+    if (i >= (limit - 1)) {
+      line[limit - 1] = '\0';
+      while ((ch = fgetc (fi)) != '\n' && ch != EOF) {
+      }
+      if ((ch == EOF) && ferror (fi)) {
+        return (-3);
+      }
+      return (-2);
+    }
+
+    line[i++] = (char) ch;
+  }
 }
 
-// Allocate memory for an array of ints.
-int *
-allocate_intmem (int len) {
+// Detect a Byte Order Mark (BOM), if present, using the longest complete match.
+// Return the corresponding BOM index, or -1 if no listed BOM is present.
+int
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom) {
 
-  void *tmp;
+  int type, best;
+  size_t i, bestlen;
+  int found;
 
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_intmem().\n", len);
-    exit (EXIT_FAILURE);
+  if ((text == NULL) || (bom == NULL)) return (-1);
+
+  best = -1;
+  bestlen = 0u;
+
+  for (type=0; type<MAXBOM; type++) {
+    if (bom[type].len > nbytes) continue;
+
+    found = 1;
+    for (i=0u; i<bom[type].len; i++) {
+      if (text[i] != bom[type].sequence[i]) {
+        found = 0;
+        break;
+      }
+    }
+
+    if (found && (bom[type].len > bestlen)) {
+      best = type;
+      bestlen = bom[type].len;
+    }
   }
 
-  tmp = (int *) malloc (len * sizeof (int));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (int));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_intmem().\n");
-    exit (EXIT_FAILURE);
-  }
+  return (best);
 }
 
 // Allocate memory for an array of chars.
 char *
-allocate_strmem (int len) {
+allocate_strmem (size_t len) {
 
-  void *tmp;
+  char *tmp;
 
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
+  if (len == 0u) {
+    fprintf (stderr, "ERROR: Cannot allocate zero bytes in allocate_strmem().\n");
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
+  tmp = calloc (len, sizeof (*tmp));
+  if (tmp == NULL) {
+    fprintf (stderr, "ERROR: Cannot allocate memory in allocate_strmem().\n");
     exit (EXIT_FAILURE);
   }
+
+  return (tmp);
 }
 
 // Allocate memory for an array of pointers to arrays of chars.
 char **
-allocate_strmemp (int len) {
-  
-  void *tmp;
-  
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmemp().\n", len);
+allocate_strmemp (size_t len) {
+
+  char **tmp;
+
+  if ((len == 0u) || (len > (SIZE_MAX / sizeof (*tmp)))) {
+    fprintf (stderr, "ERROR: Invalid allocation size in allocate_strmemp().\n");
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char **) malloc (len * sizeof (char *));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char *));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmemp().\n");
+  tmp = calloc (len, sizeof (*tmp));
+  if (tmp == NULL) {
+    fprintf (stderr, "ERROR: Cannot allocate memory in allocate_strmemp().\n");
     exit (EXIT_FAILURE);
-  } 
+  }
+
+  return (tmp);
 }
 
-// Allocate memory for an array of BOM (Byte Order Mark) structs.
-BOM *  
-allocate_bommem (int len) {
-    
-  void *tmp;    
-  
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_bommem().\n", len);
-    exit (EXIT_FAILURE); 
-  }
+// Allocate memory for an array of subtitle descriptors.
+SUBTITLE *
+allocate_subtitlemem (size_t len) {
 
-  tmp = (BOM *) malloc (len * sizeof (BOM));
-  if (tmp != NULL) {    
-    memset (tmp, 0, len * sizeof (BOM));
-    return (tmp);    
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_bommem().\n");
+  SUBTITLE *tmp;
+
+  if ((len == 0u) || (len > (SIZE_MAX / sizeof (*tmp)))) {
+    fprintf (stderr, "ERROR: Invalid allocation size in allocate_subtitlemem().\n");
     exit (EXIT_FAILURE);
   }
+
+  tmp = calloc (len, sizeof (*tmp));
+  if (tmp == NULL) {
+    fprintf (stderr, "ERROR: Cannot allocate memory in allocate_subtitlemem().\n");
+    exit (EXIT_FAILURE);
+  }
+
+  return (tmp);
 }

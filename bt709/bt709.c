@@ -14,56 +14,61 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-// bt709.c - Derive the color constants for BT.709 YCbCr colorspace.
+// bt709.c - Derive the BT.709 normalized primary matrix and luminance constants.
 // References: SMPTE RP 177-1993, ITU-R BT.709-6, ITU-T H.273 (V4)
 
 // gcc -Wall bt709.c -lm -o bt709
 
 // Usage: ./bt709
 
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 
 // Function prototypes
 int gaussjordan (int, double **);
-int *allocate_intmem (int);
-double *allocate_doublemem (int);
-double **allocate_doublememp (int);
+double *allocate_doublemem (size_t);
+double **allocate_doublememp (size_t);
 
 int
-main (int argc, char **argv) {
+main (void) {
 
   int i, j, k;
   double zr, zg, zb, zw, **p, *w, **pinv, *coeff, **c, **npm;
 
-  // Red BT.709 color primaries
+  // Red BT.709 color primary.
   const double xr = 0.640;
   const double yr = 0.330;
   zr = 1.0 - (xr + yr);
 
-  // Green BT.709 color primaries
+  // Green BT.709 color primary.
   const double xg = 0.300;
   const double yg = 0.600;
   zg = 1.0 - (xg + yg);
 
-  // Blue BT.709 color primaries
+  // Blue BT.709 color primary.
   const double xb = 0.150;
   const double yb = 0.060;
   zb = 1.0 - (xb + yb);
 
-  // White D65 BT.709 color primaries
+  // BT.709 D65 reference white.
   const double xw = 0.3127;
   const double yw = 0.3290;
   zw = 1.0 - (xw + yw);
+
+  // Standard BT.709 Y'CbCr luma coefficients.
+  const double kr = 0.2126;
+  const double kb = 0.0722;
+  const double kg = 1.0 - kr - kb;
 
   // Allocate memory for various arrays.
   p = allocate_doublememp (3);
   pinv = allocate_doublememp (3);
   c = allocate_doublememp (3);
   npm = allocate_doublememp (3);
-  for (i=0; i<3; i++) {
+  for (i = 0; i < 3; i++) {
     p[i] = allocate_doublemem (3);
     pinv[i] = allocate_doublemem (3);
     c[i] = allocate_doublemem (3);
@@ -77,7 +82,7 @@ main (int argc, char **argv) {
   p[1][0] = yr;  p[1][1] = yg;  p[1][2] = yb;
   p[2][0] = zr;  p[2][1] = zg;  p[2][2] = zb;
 
-  // Populate white matrix.
+  // Populate white vector, normalized so that Y = 1.
   w[0] = xw / yw;
   w[1] = 1.0;
   w[2] = zw / yw;
@@ -87,9 +92,9 @@ main (int argc, char **argv) {
 
   // Show color primaries matrix p.
   fprintf (stdout, "Color primaries matrix p:\n");
-  for (i=0; i<3; i++) {
+  for (i = 0; i < 3; i++) {
     fprintf (stdout, "  ");
-    for (j=0; j<3; j++) {
+    for (j = 0; j < 3; j++) {
       fprintf (stdout, "%0.4lf ", p[i][j]);
       pinv[i][j] = p[i][j];  // Copy matrix p to matrix pinv for later in-place inversion.
     }
@@ -102,38 +107,57 @@ main (int argc, char **argv) {
 
   // Show inverse of color primaries matrix.
   fprintf (stdout, "Inverse (pinv) of color primaries matrix:\n");
-  for (i=0; i<3; i++) {
+  for (i = 0; i < 3; i++) {
     fprintf (stdout, "  ");
-    for (j=0; j<3; j++) {
+    for (j = 0; j < 3; j++) {
       fprintf (stdout, "%0.4lf ", pinv[i][j]);
     }
     fprintf (stdout, "\n");
   }
   fprintf (stdout, "\n");
 
-// Test to see if p * pinv = identity vector.
 /*
-double v;
-  for (i=0; i<3; i++) {
-    v = 0.0;
-    for (j=0; j<3; j++) {
-      v += p[i][j] * pinv[j][i];
+  // Test to verify that p * pinv is the identity matrix.
+  double v, expected;
+  int identity_ok;
+
+  identity_ok = 1;
+  fprintf (stdout, "Test of p * pinv (should be the identity matrix):\n");
+  for (i = 0; i < 3; i++) {
+    fprintf (stdout, "  ");
+    for (j = 0; j < 3; j++) {
+      v = 0.0;
+      for (k = 0; k < 3; k++) {
+        v += p[i][k] * pinv[k][j];
+      }
+      fprintf (stdout, "%0.10lf ", v);
+
+      // Diagonal elements should equal 1; off-diagonal elements should equal 0.
+      expected = (i == j) ? 1.0 : 0.0;
+      if (fabs (v - expected) > 1e-12) {
+        identity_ok = 0;
+      }
     }
-    fprintf (stdout, "%0.4lf\n", v);
+    fprintf (stdout, "\n");
+  }
+  if (identity_ok) {
+    fprintf (stdout, "p * pinv is the identity matrix within the test tolerance.\n\n");
+  } else {
+    fprintf (stdout, "ERROR: p * pinv is not the identity matrix within the test tolerance.\n\n");
   }
 */
 
-  // Calculate RGB normalization coefficients.
-  // coef = pinv * w
-  for (i=0; i<3; i++) {
-    for (j=0; j<3; j++) {
+  // Calculate RGB normalization coefficients, where coeff = pinv * w.
+  for (i = 0; i < 3; i++) {
+    coeff[i] = 0.0;
+    for (j = 0; j < 3; j++) {
       coeff[i] += pinv[i][j] * w[j];
     }
   }
 
   // Show normalization coefficients.
   fprintf (stdout, "Normalization coefficient vector:\n");
-  for (i=0; i<3; i++) {
+  for (i = 0; i < 3; i++) {
     fprintf (stdout, "  %0.4lf\n", coeff[i]);
   }
   fprintf (stdout, "\n");
@@ -145,9 +169,9 @@ double v;
 
   // Show diagonal coefficient matrix.
   fprintf (stdout, "Diagonal normalization coefficient matrix c:\n");
-  for (i=0; i<3; i++) {
+  for (i = 0; i < 3; i++) {
     fprintf (stdout, "  ");
-    for (j=0; j<3; j++) {
+    for (j = 0; j < 3; j++) {
       fprintf (stdout, "%0.4lf ", c[i][j]);
     }
     fprintf (stdout, "\n");
@@ -155,35 +179,46 @@ double v;
   fprintf (stdout, "\n");
 
   // Compute NPM matrix, where NPM = P * C.
-  for (i=0; i<3; i++) {
-    for (j=0; j<3; j++) {
-      for (k=0; k<3; k++) {
-        npm[i][j] += p[i][k] * c[j][k];
+  for (i = 0; i < 3; i++) {
+    for (j = 0; j < 3; j++) {
+      npm[i][j] = 0.0;
+      for (k = 0; k < 3; k++) {
+        npm[i][j] += p[i][k] * c[k][j];
       }
     }
   }
 
   // Show NPM matrix.
   fprintf (stdout, "NPM matrix (p * c):\n");
-  for (i=0; i<3; i++) {
+  for (i = 0; i < 3; i++) {
     fprintf (stdout, "  ");
-    for (j=0; j<3; j++) {
+    for (j = 0; j < 3; j++) {
       fprintf (stdout, "%0.4lf ", npm[i][j]);
     }
     fprintf (stdout, "\n");
   }
   fprintf (stdout, "\n");
 
-  // Show luminance equation constants (second row of NPM matrix).
-  fprintf (stdout, "\nLuminance equation constants YR, YG, and YB (second row of NPM matrix) (sometimes referred to as KR, KG, and KB)\n");
-  fprintf (stdout,"Y = YR * R + YG * G + YB * B\n");
+  // The second row of the RGB-to-XYZ NPM gives the linear-light luminance coefficients.
+  // These are derived from the published BT.709 chromaticities and D65 reference white.
+  fprintf (stdout, "Derived linear-light RGB-to-XYZ luminance coefficients:\n");
+  fprintf (stdout, "Y = YR * R + YG * G + YB * B\n");
   fprintf (stdout, "  YR: %0.10lf\n", npm[1][0]);
   fprintf (stdout, "  YG: %0.10lf\n", npm[1][1]);
   fprintf (stdout, "  YB: %0.10lf\n", npm[1][2]);
   fprintf (stdout, "  SUM: YR + YG + YB = %0.10lf\n\n", npm[1][0] + npm[1][1] + npm[1][2]);
 
+  // BT.709 specifies rounded luma coefficients for the non-linear R', G', and B' signals.
+  // They are close to, but should not be confused with, the higher-precision NPM values above.
+  fprintf (stdout, "Standard BT.709 Y'CbCr luma coefficients:\n");
+  fprintf (stdout, "Y' = KR * R' + KG * G' + KB * B'\n");
+  fprintf (stdout, "  KR: %0.4lf\n", kr);
+  fprintf (stdout, "  KG: %0.4lf\n", kg);
+  fprintf (stdout, "  KB: %0.4lf\n", kb);
+  fprintf (stdout, "  SUM: KR + KG + KB = %0.4lf\n\n", kr + kg + kb);
+
   // Free allocated memory.
-  for (i=0; i<3; i++) {
+  for (i = 0; i < 3; i++) {
     free (p[i]);
     free (pinv[i]);
     free (c[i]);
@@ -199,47 +234,73 @@ double v;
   return (EXIT_SUCCESS);
 }
 
-// Gauss-Jordan in-place inversion of n*n matrix.
+// Gauss-Jordan in-place inversion of an n*n matrix using partial pivoting.
 int
 gaussjordan (int n, double **matrix) {
 
-  int i, j, k;
-  double **augmented, pivot, factor;
+  int i, j, k, pivot_row;
+  double **augmented, pivot, factor, max_pivot, *tmp_row;
 
-  // Allocate memory for various arrays.
-  augmented = allocate_doublememp (n);
-  for (i=0; i<n; i++) {
-    augmented[i] = allocate_doublemem (2 * n);  // Original matrix augmented by identity matrix
+  if (n <= 0) {
+    fprintf (stderr, "ERROR: Matrix dimension n must be greater than zero in gaussjordan().\n");
+    return (EXIT_FAILURE);
+  }
+
+  // Allocate memory for the augmented matrix [matrix | identity].
+  augmented = allocate_doublememp ((size_t) n);
+  for (i = 0; i < n; i++) {
+    augmented[i] = allocate_doublemem ((size_t) (2 * n));
   }
 
   // Augment the matrix with the identity matrix.
-  for (i=0; i<n; i++) {
-    for (j=0; j<n; j++) {
+  for (i = 0; i < n; i++) {
+    for (j = 0; j < n; j++) {
       augmented[i][j] = matrix[i][j];
       augmented[i][j + n] = (i == j) ? 1.0 : 0.0;
     }
   }
 
   // Perform Gauss-Jordan elimination.
-  for (i=0; i<n; i++) {
+  for (i = 0; i < n; i++) {
 
-    // Find the pivot element.
-    pivot = augmented[i][i];
-    if (fabs (pivot) < 1e-9) {  // If pivot is too small, the matrix is singular.
-      fprintf (stdout, "ERROR: Singular matrix in gaussjordan().\n");
+    // Use partial pivoting: choose the row with the largest absolute value in this column.
+    pivot_row = i;
+    max_pivot = fabs (augmented[i][i]);
+    for (j = i + 1; j < n; j++) {
+      if (fabs (augmented[j][i]) > max_pivot) {
+        max_pivot = fabs (augmented[j][i]);
+        pivot_row = j;
+      }
+    }
+
+    // A zero pivot after searching all remaining rows means the matrix is singular.
+    if (max_pivot == 0.0) {
+      fprintf (stderr, "ERROR: Singular matrix in gaussjordan().\n");
+      for (j = 0; j < n; j++) {
+        free (augmented[j]);
+      }
+      free (augmented);
       exit (EXIT_FAILURE);
     }
 
-    // Normalize the pivot row.
-    for (j=0; j<(2 * n); j++) {
+    // Move the selected pivot row into the current row position.
+    if (pivot_row != i) {
+      tmp_row = augmented[i];
+      augmented[i] = augmented[pivot_row];
+      augmented[pivot_row] = tmp_row;
+    }
+
+    // Normalize the pivot row so that its pivot element becomes one.
+    pivot = augmented[i][i];
+    for (j = 0; j < (2 * n); j++) {
       augmented[i][j] /= pivot;
     }
 
     // Eliminate the current column in all rows except the current row.
-    for (j=0; j<n; j++) {
+    for (j = 0; j < n; j++) {
       if (j != i) {
         factor = augmented[j][i];
-        for (k=0; k<(2 * n); k++) {
+        for (k = 0; k < (2 * n); k++) {
           augmented[j][k] -= factor * augmented[i][k];
         }
       }
@@ -247,14 +308,14 @@ gaussjordan (int n, double **matrix) {
   }
 
   // Copy the right half of the augmented matrix back to the original matrix.
-  for (i=0; i<n; i++) {
-    for (j=0; j<n; j++) {
+  for (i = 0; i < n; i++) {
+    for (j = 0; j < n; j++) {
       matrix[i][j] = augmented[i][j + n];
     }
   }
 
   // Free allocated memory.
-  for (i=0; i<n; i++) {
+  for (i = 0; i < n; i++) {
     free (augmented[i]);
   }
   free (augmented);
@@ -262,65 +323,52 @@ gaussjordan (int n, double **matrix) {
   return (EXIT_SUCCESS);
 }
 
-// Allocate memory for an array of ints.
-int *
-allocate_intmem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_intmem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = (int *) malloc (len * sizeof (int));
-  if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (int));
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_intmem().\n");
-    exit (EXIT_FAILURE);
-  }
-}
-
-// Allocate memory for an array of doubles.
+// Allocate and zero memory for an array of doubles.
 double *
-allocate_doublemem (int len)
-{ 
+allocate_doublemem (size_t len) {
+
   void *tmp;
-  
-  if (len <= 0) { 
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_doublemem().\n", len);
+
+  if (len == 0) {
+    fprintf (stderr, "ERROR: Cannot allocate memory because len = 0 in allocate_doublemem().\n");
     exit (EXIT_FAILURE);
   }
-  
-  tmp = (double *) malloc (len * sizeof (double));
+
+  if (len > SIZE_MAX / sizeof (double)) {
+    fprintf (stderr, "ERROR: Requested array is too large in allocate_doublemem().\n");
+    exit (EXIT_FAILURE);
+  }
+
+  tmp = calloc ((size_t) len, sizeof (double));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (double));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_doublemem().\n");
     exit (EXIT_FAILURE);
   }
-} 
-  
-// Allocate memory for an array of pointers to arrays of doubles.
+}
+
+// Allocate and zero memory for an array of pointers to arrays of doubles.
 double **
-allocate_doublememp (int len)
-{ 
+allocate_doublememp (size_t len) {
+
   void *tmp;
-  
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_doublememp().\n", len);
+
+  if (len == 0) {
+    fprintf (stderr, "ERROR: Cannot allocate memory because len = 0 in allocate_doublememp().\n");
     exit (EXIT_FAILURE);
   }
-  
-  tmp = (double **) malloc (len * sizeof (double *));
+
+  if (len > SIZE_MAX / sizeof (double *)) {
+    fprintf (stderr, "ERROR: Requested array is too large in allocate_doublememp().\n");
+    exit (EXIT_FAILURE);
+  }
+
+  tmp = calloc ((size_t) len, sizeof (double *));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (double *));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_doublememp().\n");
     exit (EXIT_FAILURE);
-  } 
+  }
 }

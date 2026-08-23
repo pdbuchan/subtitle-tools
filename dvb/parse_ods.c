@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,343 +16,325 @@
 
 #include "dvb.h"
 
+// Return the number of pixels represented by the current RLE command. Two
+// special commands emit one or two pixels of CLUT entry 0 without storing the
+// count in runlength.
+static size_t
+rle_count (const RLE *r) {
+
+  if (r->emit_one_00_pixel) return (1);
+  if (r->emit_two_00_pixels) return (2);
+
+  return (r->runlength);
+}
+
+// The 2-bit and 4-bit pixel-code strings are byte-aligned after their
+// end-of-string signal. Advance to the next byte without crossing the end of
+// the current top- or bottom-field data block.
+static int
+align_byte (size_t *p, size_t lim) {
+
+  size_t rem = *p % 8, add;
+
+  if (!rem) return (EXIT_SUCCESS);
+  add = 8 - rem;
+  if (*p > lim || add > lim - *p) return (EXIT_FAILURE);
+  *p += add;
+
+  return (EXIT_SUCCESS);
+}
+
+// Decode one interlaced ODS field.
+//
+// field = 0 decodes the top field onto image lines 0, 2, 4, ...
+// field = 1 decodes the bottom field onto image lines 1, 3, 5, ...
+//
+// The function is deliberately called twice for each field. During the first
+// pass write == 0, and only the maximum width and height are measured. During
+// the second pass write != 0, and pixels are stored using that final fixed
+// width as the row stride. This is necessary because ETSI EN 300 743 permits
+// a ragged right edge: individual code strings may end at different x
+// positions even though the object has one overall maximum width.
+static int
+decode_field (STATE *s, PAGE **page, size_t pi, size_t oi, SEGMENT *seg, size_t start, size_t len, size_t field, int write, FILE *fo) {
+
+  OBJECT *obj = &(*page)[pi].object[oi];
+  RLE r;
+  size_t bp, lim, x = 0, y = field, line = 0, n;
+  uint8_t type, dummy;
+  unsigned int i, count;
+
+  // Convert the field's byte range to a bit range, checking every arithmetic
+  // operation before it is used.
+  if (!bytes_available (start, len, seg[s->pid].length) ||
+      start > SIZE_MAX / 8 || len > SIZE_MAX / 8 ||
+      start * 8 > SIZE_MAX - len * 8)
+    return (EXIT_FAILURE);
+  bp = start * 8;
+  lim = bp + len * 8;
+
+  // Each sub-block begins with an 8-bit data_type.
+  while (bp < lim) {
+    if (get_bits (s, seg, &bp, lim, 8, &type)) return (EXIT_FAILURE);
+    switch (type) {
+
+      // 2-, 4-, and 8-bit/pixel code strings.
+      case 0x10:
+      case 0x11:
+      case 0x12:
+        memset (&r, 0, sizeof (r));
+        while (!r.end_of_string_signal) {
+          int rc = (type == 0x10) ?
+            parse_two_bit_code_string (s, seg, &bp, lim, &r) :
+            (type == 0x11) ?
+            parse_four_bit_code_string (s, seg, &bp, lim, &r) :
+            parse_eight_bit_code_string (s, seg, &bp, lim, &r);
+          if (rc) return (EXIT_FAILURE);
+          if (write) {
+            if (emit_pixels (page, pi, oi, &r, &x, y)) return (EXIT_FAILURE);
+          }
+          else {
+            n = rle_count (&r);
+            if (n > SIZE_MAX - x) return (EXIT_FAILURE);
+            x += n;
+          }
+        }
+
+        // 2- and 4-bit strings are padded to a byte boundary. The 8-bit
+        // string is already byte-aligned by construction.
+        if (type != 0x12 && align_byte (&bp, lim)) return (EXIT_FAILURE);
+        break;
+
+      // Pixel-code mapping tables. The present renderer does not yet retain
+      // per-object mapping tables, so these bytes are consumed to keep the ODS
+      // parser synchronized. Streams which rely on non-default 2-to-4,
+      // 2-to-8, or 4-to-8 mapping tables therefore remain a limitation.
+      case 0x20:
+        count = 2;
+        for (i = 0; i < count; i++) if (get_bits (s, seg, &bp, lim, 8, &dummy)) return (EXIT_FAILURE);
+        break;
+
+      case 0x21:
+        count = 4;
+        for (i = 0; i < count; i++) if (get_bits (s, seg, &bp, lim, 8, &dummy)) return (EXIT_FAILURE);
+        break;
+
+      case 0x22:
+        count = 16;
+        for (i = 0; i < count; i++) if (get_bits (s, seg, &bp, lim, 8, &dummy)) return (EXIT_FAILURE);
+        break;
+
+      // End-of-line code. On the measuring pass, update the object's maximum
+      // dimensions; on the writing pass, merely verify the measured width.
+      case 0xf0:
+        if (!write) {
+          if (x > obj->width) obj->width = x;
+          if (y >= obj->height) obj->height = y + 1;
+        }
+        else if (x > obj->width) return (EXIT_FAILURE);
+
+        x = 0;
+        line++;
+        if (line > (SIZE_MAX - field) / 2) return (EXIT_FAILURE);
+        y = field + line * 2;
+        break;
+
+      default:
+        fprintf (fo, "    Reserved ODS data_type: 0x%02x\n", type);
+        break;
+    }
+  }
+
+  // A field is expected to finish immediately after an end-of-line code.
+  if (x != 0) {
+    fprintf (stderr, "ODS field ended before an end-of-line code.\n");
+    return (EXIT_FAILURE);
+  }
+  return (EXIT_SUCCESS);
+}
+
 // Object Definition Segment (ODS)
 // Reference: ETSI EN 300 743
 int
-parse_ods (STATE *state, PAGE **page, size_t *offset, SEGMENT *segment, FILE *fo) {
+parse_ods (STATE *s, PAGE **page, size_t *off, SEGMENT *seg, FILE *fo) {
 
-  int temp;
-  size_t i, segment_length, top_field_data_block_length, bottom_field_data_block_length, field, bitpos, field_end_bitpos, field0_start, field1_start, field_start_byte, x, y, field_line, field_length, number_of_codes, old_size, page_idx, object_idx;
-  uint8_t sync_byte, segment_type, object_version_number, object_coding_method, non_modifying_colour_flag, data_type, stuffing, character_horizontal_position, character_vertical_position;
-  uint16_t pid, page_id, object_id, character_code;
-  RLE rle;
+  int t;
+  size_t body, end, len, top, bottom, top_start, bottom_start, bstart, blen, data, stuff, old, pi, oi, i, ncodes;
+  uint8_t sync, type, ver, method, nm, pad;
+  uint16_t pid = s->pid, page_id, obj_id, cc;
+  OBJECT *obj;
   void *tmp;
 
-  pid = state->pid;
-
   fprintf (fo, "\n  Object Definition Segment (ODS)\n");
-      
-  // Sync Byte (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  sync_byte = segment[pid].buffer[*offset]; 
-  if (sync_byte != 0x0f) {
-    fprintf (stderr, "Sync byte not found in parse_ods().\n");
-    fprintf (stderr, "Found: 0x%02x\n", sync_byte);
-    exit (EXIT_FAILURE);
-  }         
-  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", sync_byte);
-  (*offset)++;
-      
-  // Segment Type (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  segment_type = segment[pid].buffer[*offset];
-  if (segment_type != 0x13) {
-    fprintf (stderr, "Wrong Segment Type found in parse_ods().\n");
-    fprintf (stderr, "Found: 0x%02x\n", segment_type);
-    exit (EXIT_FAILURE);
-  }
-  segment_types (state, segment_type, fo);
-  (*offset)++;
-      
-  // Page ID (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  page_id = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-  state->page_id = page_id;
-  fprintf (fo, "    Page ID (2 bytes): 0x%04x\n", page_id);
-  (*offset) += 2;
 
-  // Obtain Page index from page_id.
-  temp = find_page_index (state, *page, page_id);
-  if (temp < 0) {
-    fprintf (stderr, "Cannot find index for page_id: 0x%04x in parse_ods().\n", page_id);
-    exit (EXIT_FAILURE);
-  } else {
-    page_idx = (size_t) temp;
-  }
+  // Segment header: Sync Byte, Segment Type, Page ID, Segment Length.
+  if (!bytes_available (*off, 6, seg[pid].length)) return (EXIT_FAILURE);
+
+  // Sync Byte (1 byte)
+  sync = seg[pid].buffer[(*off)++];
+  if (sync != 0x0f) return (EXIT_FAILURE);
+  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", sync);
+
+  // Segment Type (1 byte)
+  type = seg[pid].buffer[(*off)++];
+  if (type != 0x13) return (EXIT_FAILURE);
+  segment_types (s, type, fo);
+
+  // Page ID (2 bytes)
+  page_id = (uint16_t) (((uint16_t) seg[pid].buffer[*off] << 8) | seg[pid].buffer[*off + 1]);
+  *off += 2;
+  s->page_id = page_id;
+  fprintf (fo, "    Page ID (2 bytes): 0x%04x\n", page_id);
 
   // Segment Length (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  segment_length = (size_t) ((segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1]);
-  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", segment_length);
-  (*offset) += 2;
+  len = (size_t) (((uint16_t) seg[pid].buffer[*off] << 8) | seg[pid].buffer[*off + 1]);
+  *off += 2;
+  body = *off;
+  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", len);
+  if (!bytes_available (body, len, seg[pid].length) || len < 3) return (EXIT_FAILURE);
+  end = body + len;
+
+  // Obtain the compact Page array index from page_id.
+  t = find_page_index (s, *page, page_id);
+  if (t < 0) return (EXIT_FAILURE);
+  pi = (size_t) t;
 
   // Object ID (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
-  }
-  object_id = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-  state->object_id = object_id;
-  fprintf (fo, "    Object ID (2 bytes): 0x%04x\n", object_id);
-  (*offset) += 2;
+  obj_id = (uint16_t) (((uint16_t) seg[pid].buffer[*off] << 8) | seg[pid].buffer[*off + 1]);
+  *off += 2;
+  s->object_id = obj_id;
+  fprintf (fo, "    Object ID (2 bytes): 0x%04x\n", obj_id);
 
-  // Find Object index from object_id.
-  temp = find_object_index (state, *page, object_id);
-  if (temp < 0) {
-    old_size = (*page)[page_idx].nobjects;
-    object_idx = (*page)[page_idx].nobjects;  // Note it's a 0-based array.
-    tmp = (OBJECT *) realloc ((*page)[page_idx].object, (old_size + 1) * sizeof (OBJECT));
-    if (tmp != NULL) {
-      (*page)[page_idx].object = tmp;
-    } else {
-      fprintf (stderr, "Cannot allocate memory for page[%zu].object[%zu] in parse_ods().\n", page_idx, object_idx);
-      fprintf (stderr, "page_id: 0x%04x, object_id: 0x%04x\n", page_id, object_id);
-      exit (EXIT_FAILURE);
-    }
-    memset (&(*page)[page_idx].object[old_size], 0, sizeof (OBJECT));  // Clear only new elements.
-    (*page)[page_idx].object[object_idx].object_id = object_id;
-    (*page)[page_idx].object[object_idx].buffer = allocate_u8mem (IMG_BUFFER_SIZE);
-    (*page)[page_idx].nobjects++;
-
-  // Object already has memory allocated for it. Clear it for new data.
-  } else {
-    object_idx = (uint16_t) temp;
-    (*page)[page_idx].object[object_idx].width = 0;
-    (*page)[page_idx].object[object_idx].height = 0;
-    memset ((*page)[page_idx].object[object_idx].buffer, 0, IMG_BUFFER_SIZE * sizeof (uint8_t));
+  // Find the Object array index from object_id. If this is a new object,
+  // allocate both its CLUT-entry image buffer and its coded-pixel mask.
+  t = find_object_index (*page, pi, obj_id);
+  if (t < 0) {
+    old = (*page)[pi].nobjects;
+    oi = old;
+    tmp = realloc ((*page)[pi].object, (old + 1) * sizeof (OBJECT));
+    if (!tmp) return (EXIT_FAILURE);
+    (*page)[pi].object = tmp;
+    memset (&(*page)[pi].object[oi], 0, sizeof (OBJECT));
+    obj = &(*page)[pi].object[oi];
+    obj->page_id = page_id;
+    obj->object_id = obj_id;
+    obj->buffer = allocate_u8mem (IMG_PIXEL_COUNT);
+    obj->coded = allocate_u8mem (IMG_PIXEL_COUNT);
+    (*page)[pi].nobjects++;
   }
 
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-    exit (EXIT_FAILURE);
+  // Object already has memory allocated for it. Clear it for the new version.
+  else {
+    oi = (size_t) t;
+    obj = &(*page)[pi].object[oi];
+    obj->width = obj->height = 0;
+    memset (obj->buffer, 0, IMG_PIXEL_COUNT);
+    memset (obj->coded, 0, IMG_PIXEL_COUNT);
   }
 
   // Object Version Number (4 bits)
-  object_version_number = (segment[pid].buffer[*offset] >> 4) & 0x0f;  // 0x0f = 0000 1111
-  (*page)[page_idx].object[object_idx].version = object_version_number;
-  fprintf (fo, "    Object Version Number (4 bits): 0x%1x\n", object_version_number);
+  ver = (seg[pid].buffer[*off] >> 4) & 0x0f;
 
   // Object Coding Method (2 bits)
-  object_coding_method = (segment[pid].buffer[*offset] >> 2) & 3;
-  fprintf (fo, "    Object Coding Method (2 bits): %u ", object_coding_method);
-  switch (object_coding_method) {
-
-    case 0:
-      fprintf (fo, "Coding of pixels\n");
-      break;
-
-    case 1:
-      fprintf (fo, "Coded as a string of characters\n");
-      break;
-
-    default:
-      fprintf (stderr, "Object Coding Method %u is Reserved\n", object_coding_method);
-      exit (EXIT_FAILURE);
-
-  }  // End switch
+  method = (seg[pid].buffer[*off] >> 2) & 3;
 
   // Non-Modifying Colour Flag (1 bit)
-  non_modifying_colour_flag = (segment[pid].buffer[*offset] >> 1) & 1;
-  (*page)[page_idx].object[object_idx].non_modifying_colour_flag = non_modifying_colour_flag;
-  fprintf (fo, "    Non-Modifying Colour Flag (1 bit): %u\n", non_modifying_colour_flag);
-  if (non_modifying_colour_flag) {
-    fprintf (fo, " CLUT entry value of 1 is a non-modifying colour; background pixel shall not be modified\n");
-  }
+  nm = (seg[pid].buffer[*off] >> 1) & 1;
+  obj->version = ver;
+  obj->non_modifying_colour_flag = nm;
+  (*off)++;
+  fprintf (fo, "    Object Version Number (4 bits): 0x%01x\n", ver);
+  fprintf (fo, "    Object Coding Method (2 bits): %u\n", method);
+  fprintf (fo, "    Non-Modifying Colour Flag (1 bit): %u\n", nm);
 
-  // Reserved (1 bit)
-
-  (*offset)++;
-
-  // Coding of pixels
-  if (object_coding_method == 0) {
+  // Coding method 0: pixel data represented by interlaced top and bottom
+  // fields of RLE code strings.
+  if (method == 0) {
+    if (len < 7 || !bytes_available (*off, 4, end)) return (EXIT_FAILURE);
 
     // Top Field Data Block Length (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-      exit (EXIT_FAILURE);
-    }
-    top_field_data_block_length = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-    fprintf (fo, "    Top Field Data Block Length (2 bytes): %zu bytes\n", top_field_data_block_length);
-    (*offset) += 2;
+    top = (size_t) (((uint16_t) seg[pid].buffer[*off] << 8) | seg[pid].buffer[*off + 1]);
+    *off += 2;
 
     // Bottom Field Data Block Length (2 bytes)
-    if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_ods().\n");
-      exit (EXIT_FAILURE);
-    }
-    bottom_field_data_block_length = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-    fprintf (fo, "    Bottom Field Data Block Length (2 bytes): %zu bytes\n", bottom_field_data_block_length);
-    (*offset) += 2;
+    bottom = (size_t) (((uint16_t) seg[pid].buffer[*off] << 8) | seg[pid].buffer[*off + 1]);
+    *off += 2;
+    fprintf (fo, "    Top Field Data Block Length (2 bytes): %zu bytes\n", top);
+    fprintf (fo, "    Bottom Field Data Block Length (2 bytes): %zu bytes\n", bottom);
+    if (top > SIZE_MAX - bottom) return (EXIT_FAILURE);
+    data = top + bottom;
+    if (data > len - 7) return (EXIT_FAILURE);
+    stuff = len - 7 - data;
+    if (stuff > 1) return (EXIT_FAILURE);
 
-    // Subpicture Data
-    // Subpicture data is interlaced: Top Field are lines 0, 2, 4, etc. Bottom Field are line 1, 3, 5, etc.
-    // Line 0 is at top of screen.
-    (*page)[page_idx].object[object_idx].width = 0;
-    (*page)[page_idx].object[object_idx].height = 0;
-    field0_start = *offset;
-    field1_start = field0_start + top_field_data_block_length;
+    // Subpicture data is interlaced: top-field data describes image lines
+    // 0, 2, 4, ... and bottom-field data describes lines 1, 3, 5, ... .
+    top_start = *off;
+    bottom_start = top_start + top;
+    if (!bytes_available (top_start, data + stuff, end)) return (EXIT_FAILURE);
 
-    // Process both fields: 0 = top, 1 = bottom
-    for (field = 0; field < 2; field++) {
-
-      // ETSI EN 300 743: If bottom field length is 0, then the data for the top field
-      // is valid for the bottom field as well.
-      if (bottom_field_data_block_length == 0) {
-        bottom_field_data_block_length = top_field_data_block_length;
-        field1_start = field0_start;
-      }
-
-      field_start_byte = (field == 0) ? field0_start : field1_start;
-      field_length     = (field == 0) ? top_field_data_block_length
-                                      : bottom_field_data_block_length;
-
-      bitpos = field_start_byte * 8;
-      field_end_bitpos = bitpos + (field_length * 8);
-
-      x = 0;                 // Horizontal pixel position
-      field_line = 0;        // Line index within this field
-      y = field;             // Actual screen line (0 or 1 start)
-
-      while (bitpos < field_end_bitpos) {
-
-        // Check if 8 bits are available for data_type.
-        if ((bitpos + 8) > field_end_bitpos) break;
-
-        // Read next data_type.
-        get_8bits (state, segment, &bitpos, &data_type);
-        bitpos += 8;
-
-        rle.end_of_string_signal = 0;
-
-        switch (data_type) {
-
-          case 0x10:  // 2-bit/pixel code string
-            while (!rle.end_of_string_signal) {
-              parse_two_bit_code_string (state, segment, &bitpos, &rle);
-              emit_pixels (state, page, &rle, &x, y);
-            }
-
-            // Align_to_next_byte.
-            bitpos = (bitpos + 7) & ~7;
-            break;
-
-          case 0x11:  // 4-bit/pixel code string
-            while (!rle.end_of_string_signal) {
-              parse_four_bit_code_string (state, segment, &bitpos, &rle);
-              emit_pixels (state, page, &rle, &x, y);
-            }
-
-            // Align_to_next_byte.
-            bitpos = (bitpos + 7) & ~7;
-            break;
-
-          case 0x12:  // 8-bit/pixel code string
-            while (!rle.end_of_string_signal) {
-              parse_eight_bit_code_string (state, segment, &bitpos, &rle);
-              emit_pixels (state, page, &rle, &x, y);
-            }
-            break;
-
-          case 0xf0:  // End of line
-
-            // Update maximum width.
-            if ((*page)[page_idx].object[object_idx].width < x) {
-              (*page)[page_idx].object[object_idx].width = x;
-            }
-
-            // Track total height as maximum y reached.
-            if ((*page)[page_idx].object[object_idx].height <= y) {
-              (*page)[page_idx].object[object_idx].height = y + 1;  // Add 1 since y starts at 0.
-            }
-
-            x = 0;
-
-            // Move to next interlaced line.
-            field_line++;
-            y = field + (field_line * 2);
-
-            break;
-
-          default:  // Keep going; this is poor ODS structure, but allowed.
-
-            fprintf (stderr, "Unknown data_type 0x%02x in parse_ods(). This is poor ODS structure but allowed. Continuing...\n", data_type);
-
-            // Update maximum width.
-            if ((*page)[page_idx].object[object_idx].width < x) {
-              (*page)[page_idx].object[object_idx].width = x;
-            }
-
-            // Track total height as maximum y reached.
-            if ((*page)[page_idx].object[object_idx].height <= y) {
-              (*page)[page_idx].object[object_idx].height = y + 1;  // Add 1 since y starts at 0.
-            }
-
-            fprintf (fo, "    Object Width: %zu px\n", (*page)[page_idx].object[object_idx].width);
-            fprintf (fo, "    Object Height: %zu px\n", (*page)[page_idx].object[object_idx].height);
-
-            return (EXIT_SUCCESS);
-        }  // End switch
-      }  // End while
-    }  // End for field
-
-    // Update offset in bytes.
-    (*offset) = field0_start + top_field_data_block_length + bottom_field_data_block_length;
-
-    // Ensure 16-bit word alignment if segment_length is odd.
-    if ((*offset) % 2 != 0) {
-      stuffing = segment[pid].buffer[*offset];
-      if (stuffing != 0x00) {
-        fprintf (stderr, "Invalid ODS stuffing byte (0x%02x) in parse_ods().\n", stuffing);
-        exit (EXIT_FAILURE);
-      }
-      (*offset)++;  // Consume the padding byte.
+    // ETSI EN 300 743 specifies that a zero bottom-field length means the top
+    // field data is valid for the bottom field as well. Do not change the
+    // transmitted bottom length: it is still needed to advance *off correctly.
+    if (bottom == 0) {
+      bstart = top_start;
+      blen = top;
+    } else {
+      bstart = bottom_start;
+      blen = bottom;
     }
 
-  // Coded as a string of characters.
-  } else if (object_coding_method == 1) {
+    // First pass: measure the object. Because individual scan lines may have
+    // different coded widths, this pass finds the maximum x position before a
+    // fixed row stride is chosen.
+    obj->width = obj->height = 0;
+    if (decode_field (s, page, pi, oi, seg, top_start, top, 0, 0, fo) || decode_field (s, page, pi, oi, seg, bstart, blen, 1, 0, fo)) return (EXIT_FAILURE);
+    if (!obj->width || !obj->height || obj->width > MAX_IMAGE_WIDTH || obj->height > MAX_IMAGE_HEIGHT || obj->width > IMG_PIXEL_COUNT / obj->height) return (EXIT_FAILURE);
 
-    // Number of Codes (1 byte)
-    number_of_codes = segment[pid].buffer[*offset];
-    fprintf (fo, "    Number of Codes (1 byte): %zu\n", number_of_codes);
-    (*offset)++;
+    // Second pass: decode again with the final width available as a stable row
+    // stride. coded[] records exactly which pixels were supplied by the ODS,
+    // preserving the DVB ragged-right-edge "leave unmodified" semantics.
+    memset (obj->buffer, 0, IMG_PIXEL_COUNT);
+    memset (obj->coded, 0, IMG_PIXEL_COUNT);
+    if (decode_field (s, page, pi, oi, seg, top_start, top, 0, 1, fo) || decode_field (s, page, pi, oi, seg, bstart, blen, 1, 1, fo)) return (EXIT_FAILURE);
 
-    for (i = 0; i < number_of_codes; i++) {
+    // Advance over only the bytes actually present in the ODS. When the top
+    // field was reused for the bottom field, bottom remains zero here.
+    *off = bottom_start + bottom;
 
-      // Character code (2 bytes)
-      character_code = (segment[pid].buffer[*offset] << 8) |
-                        segment[pid].buffer[*offset + 1];
-      (*offset) += 2;
-
-      // Horizontal position (1 byte)
-      character_horizontal_position = segment[pid].buffer[*offset];
-      (*offset)++;
-
-      // Vertical position (1 byte)
-      character_vertical_position = segment[pid].buffer[*offset];
-      (*offset)++;
-
-      fprintf (fo, "    Character %zu: code=0x%04x x=%u y=%u\n", i + 1, character_code, character_horizontal_position, character_vertical_position);
-
-      /*
-         Typical implementations store these glyphs and render
-         them later with a font. Since DVB subtitle streams almost
-         never use this coding mode, a minimal decoder can simply
-         ignore them safely.
-      */
+    // At most one stuffing byte may follow the pixel data.
+    if (stuff) {
+      pad = seg[pid].buffer[(*off)++];
+      if (pad != 0) return (EXIT_FAILURE);
     }
+  }
 
-  }  // End if object_coding_method
+  // Coding method 1: string of 16-bit character codes. Character rendering is
+  // not implemented here, but parse and report the codes without losing
+  // synchronization with the next segment.
+  else if (method == 1) {
+    if (!bytes_available (*off, 1, end)) return (EXIT_FAILURE);
+    ncodes = seg[pid].buffer[(*off)++];
+    fprintf (fo, "    Number of Codes (1 byte): %zu\n", ncodes);
+    if (ncodes > (end - *off) / 2) return (EXIT_FAILURE);
+    for (i = 0; i < ncodes; i++) {
+      cc = (uint16_t) (((uint16_t) seg[pid].buffer[*off] << 8) | seg[pid].buffer[*off + 1]);
+      *off += 2;
+      fprintf (fo, "    Character %zu: code=0x%04x\n", i + 1, cc);
+    }
+    *off = end;
+  }
 
-  // Report object dimensions.
-  fprintf (fo, "    Object Width: %zu px\n", (*page)[page_idx].object[object_idx].width);
-  fprintf (fo, "    Object Height: %zu px\n", (*page)[page_idx].object[object_idx].height);
+  // Other object coding methods are reserved or unsupported. The segment
+  // length still allows us to skip them safely.
+  else {
+    fprintf (fo, "    Reserved/unsupported Object Coding Method.\n");
+    *off = end;
+  }
+
+  if (*off != end) return (EXIT_FAILURE);
+  fprintf (fo, "    Object Width: %zu px\n", obj->width);
+  fprintf (fo, "    Object Height: %zu px\n", obj->height);
 
   return (EXIT_SUCCESS);
 }

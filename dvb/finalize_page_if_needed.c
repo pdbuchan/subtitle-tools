@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,51 +16,44 @@
 
 #include "dvb.h"
 
-// Determine Display Set end time, call assemble_composition(), free/clear all data for this page_id/Display Set.
+// Determine the end timestamp of a completed Display Set, optionally render
+// it to a bitmap, and then release the per-Display-Set data for this page.
+//
+// The page index is passed explicitly. A transport stream may carry several
+// subtitle page_ids, so relying on state->page_id here could finalize the
+// wrong page when EOF causes all outstanding pages to be flushed.
 void
-finalize_page_if_needed (STATE *state, PAGE *page, size_t page_idx, PES *pes) {
+finalize_page_if_needed (STATE *s, PAGE *page, size_t p, PES *pes) {
 
-  uint64_t timeout_end, pts_end, final_end;
+  int64_t start, to = 0, pts, end;
 
-  // Return if current Display Set (page) is not complete.
-  if (!page[page_idx].complete) {
-    return;
-  }
+  // An END segment marks the Display Set complete. Leave an in-progress page
+  // untouched until that condition has been seen.
+  if (!page[p].complete) return;
 
-  // Calculate end time based on timeout.
-  if (page[page_idx].time_out > 0) {
-    timeout_end = page[page_idx].start.totalms + ((uint64_t) page[page_idx].time_out * 1000);
-  } else {
-    timeout_end = 0;
-  }
+  // A PCS page_time_out supplies one possible end time. Guard the conversion
+  // from seconds to milliseconds against signed overflow.
+  start = page[p].start.totalms;
+  if (page[p].time_out && start <= INT64_MAX - (int64_t) page[p].time_out * 1000) to = start + (int64_t) page[p].time_out * 1000;
 
-  // Calculate end time based on PTS.
-  // Note:  For the very last subtitle in a stream, there is often no final PES segment, and thus no new PTS.
-  //        In that case, pes->pts will be the last PTS to arrive, and it's likely to be the same as the start timestamp.
-  //        We therefore guard against end < start below.
-  pts_end = pes->pts.totalms;
+  // The PTS of the next Display Set is normally the other candidate end time.
+  // Use whichever valid candidate occurs first.
+  pts = pes->pts.totalms;
+  if (to > start && pts > start) end = pts < to ? pts : to;
+  else if (pts > start) end = pts;
+  else if (to > start) end = to;
 
-  // Choose the earlier of timeout_end and pts_end.
-  if (pts_end < timeout_end) {
-    final_end = pts_end;
-  } else {
-    final_end = timeout_end;
-  }
+  // The final subtitle in a stream may have no following PES/PTS. If neither
+  // normal end time is usable, give it a conservative five-second duration.
+  else end = start <= INT64_MAX - 5000 ? start + 5000 : INT64_MAX;
 
-  // Ensure end > start.
-  if (final_end <= page[page_idx].start.totalms) {
-    final_end = page[page_idx].start.totalms + 5000;  // Small safe fallback of 5 seconds
-  }
+  page[p].end.totalms = end;
+  mstotime (&page[p].end);
+  s->nsubs++;
 
-  page[page_idx].end.totalms = final_end;
-  mstotime (&page[page_idx].end);
+  // assemble_composition() also writes the BMP when bitmap output is enabled.
+  if (s->makebmp_flag && assemble_composition (s, &page, p) != EXIT_SUCCESS) fprintf (stderr, "Could not assemble page_id 0x%04x.\n", page[p].page_id);
 
-  // Increment subtitle counter.
-  state->nsubs++;
-
-  // Render bitmap, if requested.
-  if (state->makebmp_flag) assemble_composition (state, &page);
-
-  // Clear page for next Display Set.
-  clear_page (state, page);
+  // The PAGE slot remains available for the next Display Set of this page_id.
+  clear_page (page, p);
 }

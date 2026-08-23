@@ -16,27 +16,89 @@
 
 #include "sub.h"
 
-// Record any PTS or DTS timestamp changes to change array.
+static void
+ensure_change_capacity (OPTIONS *options, size_t additional) {
+
+  size_t needed, new_capacity;
+  CHANGE *tmp;
+
+  if (additional > SIZE_MAX - options->nchanges) {
+    fprintf (stderr, "Timestamp change list size overflow.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  needed = options->nchanges + additional;
+  if (needed <= options->change_capacity) return;
+
+  new_capacity = options->change_capacity == 0 ? 1024 : options->change_capacity;
+  while (new_capacity < needed) {
+    if (new_capacity > SIZE_MAX / 2) {
+      new_capacity = needed;
+      break;
+    }
+    new_capacity *= 2;
+  }
+
+  if (new_capacity > SIZE_MAX / sizeof (CHANGE)) {
+    fprintf (stderr, "Timestamp change list is too large.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  tmp = realloc (options->change, new_capacity * sizeof (CHANGE));
+  if (tmp == NULL) {
+    fprintf (stderr, "Cannot grow timestamp change list.\n");
+    exit (EXIT_FAILURE);
+  }
+
+  options->change = tmp;
+  options->change_capacity = new_capacity;
+}
+
 void
 record_pes_timestamp_change (OPTIONS *options, size_t pos, uint64_t ts90, uint8_t prefix) {
 
-  options->change[options->nchanges].offset = pos;
-  options->change[options->nchanges].new_value = prefix | ((ts90 >> 29) & 0x0e) | 0x01;
-  options->nchanges++;
+  ensure_change_capacity (options, 5);
+  ts90 &= PES_TS_MASK;
 
-  options->change[options->nchanges].offset = pos + 1;
-  options->change[options->nchanges].new_value = (ts90 >> 22) & 0xff;
-  options->nchanges++;
+  options->change[options->nchanges++] = (CHANGE){pos,     (uint8_t) (prefix | ((ts90 >> 29) & 0x0e) | 0x01)};
+  options->change[options->nchanges++] = (CHANGE){pos + 1, (uint8_t) ((ts90 >> 22) & 0xff)};
+  options->change[options->nchanges++] = (CHANGE){pos + 2, (uint8_t) (((ts90 >> 14) & 0xfe) | 0x01)};
+  options->change[options->nchanges++] = (CHANGE){pos + 3, (uint8_t) ((ts90 >> 7) & 0xff)};
+  options->change[options->nchanges++] = (CHANGE){pos + 4, (uint8_t) (((ts90 & 0x7f) << 1) | 0x01)};
+}
 
-  options->change[options->nchanges].offset = pos + 2;
-  options->change[options->nchanges].new_value = ((ts90 >> 14) & 0xfe) | 0x01;
-  options->nchanges++;
+static int
+compare_change (const void *a, const void *b) {
 
-  options->change[options->nchanges].offset = pos + 3;
-  options->change[options->nchanges].new_value = (ts90 >> 7) & 0xff;
-  options->nchanges++;
+  const CHANGE *ca = a;
+  const CHANGE *cb = b;
 
-  options->change[options->nchanges].offset = pos + 4;
-  options->change[options->nchanges].new_value = ((ts90 & 0x7f) << 1) | 0x01;
-  options->nchanges++;
+  if (ca->offset < cb->offset) return -1;
+  if (ca->offset > cb->offset) return 1;
+  return 0;
+}
+
+void
+sort_and_compact_changes (OPTIONS *options) {
+
+  size_t read_index, write_index;
+
+  if (options->nchanges < 2) return;
+
+  qsort (options->change, options->nchanges, sizeof (CHANGE), compare_change);
+
+  write_index = 1;
+  for (read_index = 1; read_index < options->nchanges; read_index++) {
+    if (options->change[read_index].offset == options->change[write_index - 1].offset) {
+      if (options->change[read_index].new_value != options->change[write_index - 1].new_value) {
+        fprintf (stderr, "Conflicting timestamp rewrites at file offset 0x%zx.\n",
+                 options->change[read_index].offset);
+        exit (EXIT_FAILURE);
+      }
+      continue;
+    }
+    options->change[write_index++] = options->change[read_index];
+  }
+
+  options->nchanges = write_index;
 }

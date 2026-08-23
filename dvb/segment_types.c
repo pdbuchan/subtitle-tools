@@ -21,6 +21,8 @@
 int
 segment_types (STATE *state, uint8_t segment_type, FILE *fo) {
 
+  (void) state;
+
   switch (segment_type) {
 
     case 0x10:
@@ -40,7 +42,7 @@ segment_types (STATE *state, uint8_t segment_type, FILE *fo) {
       break;
 
     case 0x14:
-      fprintf (fo, "    Segment Type (1 byte): 0x%02x Display Definition Segment (DDS)n", segment_type);
+      fprintf (fo, "    Segment Type (1 byte): 0x%02x Display Definition Segment (DDS)\n", segment_type);
       break;
 
     case 0x15:

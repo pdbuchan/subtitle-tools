@@ -8,7 +8,7 @@ A command-line adaptation of Google's Compact Encoding Detection code for analyz
 make
 ```
 
-The upstream detector code can produce numerous compiler warnings.
+The included detector source builds cleanly with the warning flags enabled in the Makefile.
 
 ## Usage
 

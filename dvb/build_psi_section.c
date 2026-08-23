@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,112 +16,148 @@
 
 #include "dvb.h"
 
-// Add packet payload to appropriate PSI section buffer, differentiated by PID.
-// If current stream section is complete, call section parser.
+// Reset the reassembly state for one PSI PID while retaining its allocated
+// buffer for reuse by the next section.
+static void
+reset_section (SECTION *s) {
+
+  s->length = 0;
+  s->bytecount = 0;
+}
+
+// Add a TS packet payload to the current PID's PSI section reassembly buffer.
+// A PSI section may span several TS packets, and one TS payload may contain
+// the end of one section followed by one or more complete new sections.
 int
-build_psi_section (STATE *state, PAT *pat, uint8_t *tsdata, size_t tslen, int ts_payloadlen, SECTION *section, FILE *fo) {
+build_psi_section (STATE *state, PAT *pat, uint8_t *tsdata, size_t tslen, size_t ts_payloadlen, SECTION *section, FILE *fo) {
 
-  size_t pointer, total_len, payload_end, consumed, section_length;
-  uint16_t pid;
+  size_t end, pointer, n, need;
+  uint16_t pid = state->pid;
+  SECTION *s = &section[pid];
 
-  pid = state->pid;
+  // Compute the end of the TS payload only after validating its declared
+  // length against the input buffer.
+  if (!bytes_available (state->ts_index, ts_payloadlen, tslen)) {
+    fprintf (stderr, "TS payload exceeds input in build_psi_section().\n");
+    return (EXIT_FAILURE);
+  }
+  end = state->ts_index + ts_payloadlen;
 
-  // Allocate memory for PSI section buffer, if not yet allocated.
-  if (!section[pid].buffer) {  // Not allocated yet.
-    section[pid].buffer = allocate_u8mem (MAX_BUFFERLEN);
+  // Allocate one persistent PSI reassembly buffer per PID on first use.
+  if (!s->buffer) {
+    s->buffer = allocate_u8mem (MAX_BUFFERLEN);
   }
 
-  payload_end = state->ts_index + ts_payloadlen;
-  consumed = 0;
-
-  // New section start; the last part of previous section may exist.
-  // Expect: pointer_field, table_id, section_length
+  // With PUSI set, pointer_field gives the number of bytes before the first
+  // new section. Those bytes may complete a section begun in an earlier TS
+  // packet.
   if (state->pusi) {
-
-    if (state->ts_index >= payload_end) return (EXIT_SUCCESS);
-
-    // Pointer Field (1 byte)
-    pointer = (size_t) tsdata[state->ts_index];
-    state->ts_index++;
-    consumed++;
-
-    // Pointer bytes belong to previous section ONLY if one exists.
-    while ((pointer > 0) && (state->previous_section_bytecount[pid] > 0) && (state->previous_section_bytecount[pid] < state->previous_section_length[pid]) && (state->ts_index < payload_end)) {
-      section[pid].buffer[state->previous_section_bytecount[pid]] = tsdata[state->ts_index];
-      state->previous_section_bytecount[pid]++;
-      state->ts_index++;
-      consumed++;
-      pointer--;
+    if (state->ts_index >= end) {
+      return (EXIT_FAILURE);
+    }
+    pointer = tsdata[state->ts_index++];
+    if (!bytes_available (state->ts_index, pointer, end)) {
+      fprintf (stderr, "PSI pointer_field exceeds TS payload.\n");
+      return (EXIT_FAILURE);
     }
 
-    // If previous section just completed, parse it, and clear buffer for next section.
-    // Note that previous_section_length would == 0 if previous section was completed and sent to parse_psi_section().
-    if ((state->previous_section_length[pid] > 0) && (state->previous_section_bytecount[pid] == state->previous_section_length[pid])) {
+    // pointer_field is the number of bytes before the first new PSI section.
+    // Those bytes may complete a section begun in the previous TS packet.
+    while (pointer > 0 && s->bytecount > 0) {
+      if (s->length == 0) {
+        need = 3 - s->bytecount;
+      } else {
+        need = s->length - s->bytecount;
+      }
+      n = pointer < need ? pointer : need;
+      memcpy (s->buffer + s->bytecount, tsdata + state->ts_index, n);
+      s->bytecount += n;
+      state->ts_index += n;
+      pointer -= n;
 
-      parse_psi_section (state, pat, section, fo);
-
-      section[pid].length = 0;
-      section[pid].bytecount = 0;
-      memset (section[pid].buffer, 0, MAX_BUFFERLEN * sizeof (uint8_t));
-    }
-
-    // Skip any remaining pointer stuffing.
-    while ((pointer > 0) && (state->ts_index < payload_end)) {
-      state->ts_index++;
-      consumed++;
-      pointer--;
-    }
-  }  // End if state->pusi
-
-  // Parse sections in payload.
-  while ((state->ts_index + 3) <= payload_end) {
-
-    // Start of a new section.
-    if (section[pid].bytecount == 0) {
-
-      // Stuffing bytes; no more sections in this TS payload.
-      if (tsdata[state->ts_index] == 0xff) {
-        break;
+      // Once the three-byte PSI prefix is available, section_length tells us
+      // the exact total number of bytes to collect.
+      if (s->length == 0 && s->bytecount == 3) {
+        s->length = 3 + (size_t) (((s->buffer[1] & 0x0f) << 8) | s->buffer[2]);
+        if (s->length > MAX_BUFFERLEN) {
+          fprintf (stderr, "PSI section exceeds reassembly buffer.\n");
+          return (EXIT_FAILURE);
+        }
       }
 
-      section_length = (size_t) (((tsdata[state->ts_index + 1] & 0x0f) << 8) | tsdata[state->ts_index + 2]);
-      total_len = 3 + section_length;
-      section[pid].length = total_len;
+      // If the pointer bytes completed the previous section, parse it before
+      // moving to the first new section announced by this PUSI.
+      if (s->length > 0 && s->bytecount == s->length) {
+        if (parse_psi_section (state, pat, section, fo) != EXIT_SUCCESS) {
+          return (EXIT_FAILURE);
+        }
+        reset_section (s);
+        break;
+      }
     }
 
-    // Copy bytes until section complete or payload ends.
-    while ((state->ts_index < payload_end) && (section[pid].bytecount < section[pid].length)) {
+    // Any remaining pointer bytes are stuffing. If a previous section still
+    // is incomplete at the announced new-section boundary, discard it rather
+    // than splicing two sections together.
+    state->ts_index += pointer;
+    if (s->bytecount != 0) {
+      fprintf (stderr, "Incomplete PSI section at a new-section boundary.\n");
+      reset_section (s);
+    }
+  } else if (s->bytecount == 0) {
+    // A continuation packet without an existing section cannot be decoded.
+    state->ts_index = end;
+    return (EXIT_SUCCESS);
+  }
 
-      section[pid].buffer[section[pid].bytecount] = tsdata[state->ts_index];
-      section[pid].bytecount++;
-      state->ts_index++;
-      consumed++;
+  // Parse zero or more PSI sections beginning in the remaining TS payload.
+  while (state->ts_index < end) {
+
+    // 0xff after a completed section is PSI stuffing; no further sections are
+    // present in this TS payload.
+    if (s->bytecount == 0 && tsdata[state->ts_index] == 0xff) {
+      state->ts_index = end;
+      break;
     }
 
-    // Section complete.
-    if (section[pid].bytecount == section[pid].length) {
+    // Reassemble the three-byte PSI prefix first so section_length becomes
+    // known before copying the rest of the section.
+    if (s->length == 0) {
+      need = 3 - s->bytecount;
+      n = end - state->ts_index;
+      if (n > need) n = need;
+      memcpy (s->buffer + s->bytecount, tsdata + state->ts_index, n);
+      s->bytecount += n;
+      state->ts_index += n;
+      if (s->bytecount < 3) break;
 
-      parse_psi_section (state, pat, section, fo);
+      s->length = 3 + (size_t) (((s->buffer[1] & 0x0f) << 8) | s->buffer[2]);
+      if (s->length > MAX_BUFFERLEN || s->length < 3) {
+        fprintf (stderr, "Invalid PSI section length.\n");
+        return (EXIT_FAILURE);
+      }
+    }
 
-      section[pid].length = 0;
-      section[pid].bytecount = 0;
-      memset (section[pid].buffer, 0, MAX_BUFFERLEN * sizeof (uint8_t));
+    // Copy as much of the known-length section as this payload contains.
+    need = s->length - s->bytecount;
+    n = end - state->ts_index;
+    if (n > need) n = need;
+    memcpy (s->buffer + s->bytecount, tsdata + state->ts_index, n);
+    s->bytecount += n;
+    state->ts_index += n;
 
-    // Loop continues: may be another section.
-    } else {
-      break;  // Need next TS packet.
+    // A complete section is parsed immediately. The loop then permits another
+    // section to begin later in the same TS payload.
+    if (s->bytecount == s->length) {
+      if (parse_psi_section (state, pat, section, fo) != EXIT_SUCCESS) {
+        return (EXIT_FAILURE);
+      }
+      reset_section (s);
     }
   }
 
-  // Skip remaining payload.
-  while (consumed < ts_payloadlen) {
-    state->ts_index++;
-    consumed++;
-  }
-
-  // Keep record of last bytecount and len.
-  state->previous_section_length[pid] = section[pid].length;
-  state->previous_section_bytecount[pid] = section[pid].bytecount;
-
+  // Preserve the current reassembly counters for diagnostic/state reporting.
+  state->previous_section_length[pid] = s->length;
+  state->previous_section_bytecount[pid] = s->bytecount;
   return (EXIT_SUCCESS);
 }

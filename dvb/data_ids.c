@@ -21,6 +21,8 @@
 int
 data_ids (STATE *state, uint8_t data_identifier, FILE *fo) {
 
+  (void) state;
+
   fprintf (fo, "  Data Identifier (1 byte): 0x%02x ", data_identifier);
 
   switch (data_identifier) {
@@ -38,13 +40,13 @@ data_ids (STATE *state, uint8_t data_identifier, FILE *fo) {
       break;
 
     default:
-      if ((data_identifier >= 0x00) && (data_identifier <= 0x0f)) {
+      if (data_identifier <= 0x0f) {
         fprintf (fo, "Reserved for future use\n");
       } else if ((data_identifier >= 0x10) && (data_identifier <= 0x1f)) {
         fprintf (fo, "Reserved for EBU data (see ETSI EN 300 472)\n");
       } else if ((data_identifier >= 0x23) && (data_identifier <= 0x7f)) {
         fprintf (fo, "Reserved for future use\n");
-      } else if ((data_identifier >= 0x80) && (data_identifier <= 0xff)) {
+      } else if (data_identifier >= 0x80) {
         fprintf (fo, "User defined\n");
      }
 

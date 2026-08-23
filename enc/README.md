@@ -8,7 +8,7 @@ Detects the likely character encoding of a SubRip or text file using both Google
 - `chardet`
 - `iconv`
 
-The program invokes `chardet` and `iconv` through system calls.
+The program invokes `chardet` and `iconv` directly as child processes; it does not pass filenames or encoding names through a command shell.
 
 ## Build
 
@@ -16,7 +16,7 @@ The program invokes `chardet` and `iconv` through system calls.
 make
 ```
 
-The included Google detector code can produce numerous compiler warnings.
+The included detector source builds cleanly with the warning flags enabled in the Makefile.
 
 ## Usage
 

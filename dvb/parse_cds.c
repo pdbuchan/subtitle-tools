@@ -1,10 +1,10 @@
 /*  Copyright (C) 2026 P. David Buchan (pdbuchan@gmail.com)
-
+  
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-
+  
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -16,297 +16,173 @@
 
 #include "dvb.h"
 
+// Convert the DVB transparency value T to the conventional alpha direction
+// used internally by this program: alpha 255 = opaque, alpha 0 = transparent.
+//
+// EN 300 743 defines T = 0 as no transparency and says that maximum T plus
+// one would correspond to full transparency. Therefore an 8-bit T value is
+// interpreted as T / 256 rather than T / 255.
+static uint8_t
+alpha_from_t (uint8_t t) {
+
+  return ((uint8_t) ((((uint32_t) (256U - t) * 255U) + 128U) / 256U));
+}
+
+// Convert one DVB YCbCr/T CLUT entry to the RGBA representation used by the
+// renderer. EN 300 743 gives Y = 0 a special meaning of full transparency, so
+// no BT.601 conversion is performed for that value.
+static RGBA
+rgba_from_ycbcr (uint8_t y, uint8_t cb, uint8_t cr, uint8_t t) {
+
+  RGBA a;
+  int rgb[3];
+
+  if (!y) {
+    a.r = a.g = a.b = a.a = 0;
+    return (a);
+  }
+
+  YCbCr2RGB_bt601 (y, cb, cr, rgb);
+  a.r = (uint8_t) rgb[0];
+  a.g = (uint8_t) rgb[1];
+  a.b = (uint8_t) rgb[2];
+  a.a = alpha_from_t (t);
+
+  return (a);
+}
+
 // CLUT Definition Segment (CDS)
-// Reference: ETSI EN 300 743
+// Reference: ETSI EN 300 743.
 int
-parse_cds (STATE *state, PAGE **page, size_t *offset, SEGMENT *segment, FILE *fo) {
+parse_cds (STATE *s, PAGE **page, size_t *off, SEGMENT *seg, FILE *fo) {
 
-  int temp, rgb[3];
-  size_t consumed, segment_length, old_size, page_idx, clut_idx;
-  uint8_t sync_byte, segment_type, clut_id, clut_version_number, clut_entry_id, full_range_flag, y, cb, cr, t, f2, f4, f8;
-  uint16_t pid, page_id;
+  int k;
+  size_t body, end, len, pi, ci, old, need;
+  uint8_t sync, type, id, ver, eid, full, y, cr, cb, t, f2, f4, f8, ry, rr, rb, rt;
+  uint16_t pid = s->pid, page_id;
   void *tmp;
-
-  pid = state->pid;
+  RGBA rgba;
 
   fprintf (fo, "\n  CLUT Definition Segment (CDS)\n");
 
+  // Segment header: Sync Byte, Segment Type, Page ID, Segment Length.
+  if (!bytes_available (*off, 6, seg[pid].length)) return (EXIT_FAILURE);
+
   // Sync Byte (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-    exit (EXIT_FAILURE);
-  }
-  sync_byte = segment[pid].buffer[*offset];
-  if (sync_byte != 0x0f) {
-    fprintf (stderr, "Sync byte not found in parse_cds().\n");
-    fprintf (stderr, "Found: 0x%02x\n", sync_byte);
-    exit (EXIT_FAILURE);
-  }         
-  fprintf (fo, "    Sync Byte (1 byte): 0x%02x\n", sync_byte);
-  (*offset)++;
+  sync = seg[pid].buffer[(*off)++];
+  if (sync != 0x0f) return (EXIT_FAILURE);
 
   // Segment Type (1 byte)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-    exit (EXIT_FAILURE);
-  }
-  segment_type = segment[pid].buffer[*offset];
-  if (segment_type != 0x12) {
-    fprintf (stderr, "Wrong Segment Type found in parse_cds().\n");
-    fprintf (stderr, "Found: 0x%02x\n", segment_type);
-    exit (EXIT_FAILURE);
-  }
-  segment_types (state, segment_type, fo);
-  (*offset)++;
+  type = seg[pid].buffer[(*off)++];
+  if (type != 0x12) return (EXIT_FAILURE);
+  segment_types (s, type, fo);
 
   // Page ID (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-    exit (EXIT_FAILURE);
-  }
-  page_id = (segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1];
-  state->page_id = page_id;
-  fprintf (fo, "    Page ID (2 bytes): 0x%04x\n", page_id);
-  (*offset) += 2;
-
-  // Obtain Page index from page_id.
-  temp = find_page_index (state, *page, page_id);
-  if (temp < 0) {
-    fprintf (stderr, "Cannot find index for page_id: 0x%04x in parse_cds().\n", page_id);
-    exit (EXIT_FAILURE);
-  } else {
-    page_idx = (size_t) temp;
-  }
+  page_id = (uint16_t) (((uint16_t) seg[pid].buffer[*off] << 8) | seg[pid].buffer[*off + 1]);
+  *off += 2;
+  s->page_id = page_id;
 
   // Segment Length (2 bytes)
-  if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-    exit (EXIT_FAILURE);
+  len = (size_t) (((uint16_t) seg[pid].buffer[*off] << 8) | seg[pid].buffer[*off + 1]);
+  *off += 2;
+  body = *off;
+  if (!bytes_available (body, len, seg[pid].length) || len < 2) return (EXIT_FAILURE);
+  end = body + len;
+  fprintf (fo, "    Page ID (2 bytes): 0x%04x\n    Segment Length (2 bytes): %zu bytes\n", page_id, len);
+
+  // Obtain the compact Page array index from page_id.
+  k = find_page_index (s, *page, page_id);
+  if (k < 0) return (EXIT_FAILURE);
+  pi = (size_t) k;
+
+  // CLUT ID (1 byte). One clut_id identifies a CLUT family consisting of a
+  // 2-bit, 4-bit, and 8-bit CLUT representing the same palette.
+  id = seg[pid].buffer[(*off)++];
+
+  // Allocate this CLUT family if it has not been seen before. Start with the
+  // ETSI default CLUTs; incoming CDS entries overwrite only the entries they
+  // explicitly define.
+  k = find_clut_index (*page, pi, id);
+  if (k < 0) {
+    old = (*page)[pi].ncluts;
+    tmp = realloc ((*page)[pi].clut, (old + 1) * sizeof (CLUT_FAMILY));
+    if (!tmp) return (EXIT_FAILURE);
+    (*page)[pi].clut = tmp;
+    memset (&(*page)[pi].clut[old], 0, sizeof (CLUT_FAMILY));
+    ci = old;
+    (*page)[pi].clut[ci].clut_id = id;
+    (*page)[pi].ncluts++;
+    initialize_clut_family (*page, pi, ci);
   }
-  segment_length = (size_t) ((segment[pid].buffer[*offset] << 8) |
-            segment[pid].buffer[(*offset) + 1]);
-  fprintf (fo, "    Segment Length (2 bytes): %zu bytes\n", segment_length);
-  (*offset) += 2;
-  consumed = 0;
+  else ci = (size_t) k;
 
-  // CLUT ID (1 byte)
-  // One clut_id identifies a CLUT family, which is composed of: 2-bit, 4-bit, and 8-bit CLUTs representing the same palette.
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-    exit (EXIT_FAILURE);
-  }
-  clut_id = segment[pid].buffer[*offset];
-  fprintf (fo, "    CLUT ID (1 byte): 0x%02x\n", clut_id);
-  (*offset)++;
-  consumed++;
+  // CLUT Family Version Number (4 bits), followed by 4 reserved bits.
+  ver = (seg[pid].buffer[*off] >> 4) & 0x0f;
+  (*page)[pi].clut[ci].version = ver;
+  (*off)++;
+  fprintf (fo, "    CLUT ID: 0x%02x Version: 0x%x\n", id, ver);
 
-  // Allocate memory for this clut_id within page_id if not already available.
-  temp = find_clut_index (state, *page, clut_id);
-  if (temp < 0) {
-    old_size = (*page)[page_idx].ncluts;
-    clut_idx = (*page)[page_idx].ncluts;  // Note it's a 0-based array.
-    tmp = (CLUT_FAMILY *) realloc ((*page)[page_idx].clut, (old_size + 1) * sizeof (CLUT_FAMILY));
-    if (tmp != NULL) {
-      (*page)[page_idx].clut = tmp;
-    } else {
-      fprintf (stderr, "Cannot allocate memory for page[%zu].clut[%zu] in parse_cds().\n", page_idx, clut_idx);
-      fprintf (stderr, "page_id: 0x%04x, clut_id: 0x%02x\n", page_id, clut_id);
-      exit (EXIT_FAILURE);
-    }
-    memset (&(*page)[page_idx].clut[old_size], 0, sizeof (CLUT_FAMILY));  // Clear only new elements.
-    (*page)[page_idx].clut[clut_idx].clut_id = clut_id;
-    (*page)[page_idx].ncluts++;
-
-    // Initialize CLUT family clut_id with default CLUT contents.
-    // Incoming CLUT Definition Sections can overwrite none, some, or all of the default CLUT entries.
-    initialize_clut_family (state, *page, clut_idx);
-
-  // CLUT already has memory allocated for it; keep index.
-  // Incoming CLUT Definition Sections can overwrite none, some, or all of the default or existing CLUT entries.
-  } else {
-    clut_idx = (size_t) temp;
-  }
-
-  // CLUT Family Version Number (4 bits)
-  if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-    fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-    exit (EXIT_FAILURE);
-  }
-  clut_version_number = (segment[pid].buffer[*offset] >> 4) & 0x0f;  // 0x0f = 1111
-  (*page)[page_idx].clut[clut_idx].version = clut_version_number;
-  fprintf (fo, "    CLUT Version Number (4 bits): 0x%01x\n", clut_version_number);
-
-  // Reserved (4 bits)
-
-  (*offset)++;
-  consumed++;
-
-  // CLUT Entry Loop
-  while ((consumed < segment_length) && ((*offset) < segment[pid].length)) {
+  // CLUT Entry Loop. Each entry states which member of the CLUT family it
+  // updates, followed by Y, Cr, Cb, and transparency T.
+  while (*off < end) {
+    if (!bytes_available (*off, 2, end)) return (EXIT_FAILURE);
 
     // CLUT Entry ID (1 byte)
-    if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-      exit (EXIT_FAILURE);
+    eid = seg[pid].buffer[(*off)++];
+
+    // 2-bit/entry, 4-bit/entry, and 8-bit/entry CLUT flags.
+    f2 = (seg[pid].buffer[*off] >> 7) & 1;
+    f4 = (seg[pid].buffer[*off] >> 6) & 1;
+    f8 = (seg[pid].buffer[*off] >> 5) & 1;
+
+    // full_range_flag describes the RESOLUTION of the following component
+    // fields. It does not select full-range versus limited-range BT.601.
+    full = seg[pid].buffer[(*off)++] & 1;
+    need = full ? 4 : 2;
+    if (!bytes_available (*off, need, end)) return (EXIT_FAILURE);
+
+    // Full-resolution form: 8 bits each for Y, Cr, Cb, and T.
+    if (full) {
+      y = seg[pid].buffer[*off];
+      cr = seg[pid].buffer[*off + 1];
+      cb = seg[pid].buffer[*off + 2];
+      t = seg[pid].buffer[*off + 3];
+      *off += 4;
     }
-    clut_entry_id = segment[pid].buffer[*offset];
-    fprintf (fo, "      CLUT Entry ID (1 byte): 0x%02x\n", clut_entry_id);
-    (*offset)++;
-    consumed++;
 
-    if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-      fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-      exit (EXIT_FAILURE);
+    // Reduced-resolution form: the transmitted fields contain only the most
+    // significant 6, 4, 4, and 2 bits respectively. Restore their bit
+    // positions by appending zero low-order bits before conversion.
+    else {
+      ry = (seg[pid].buffer[*off] >> 2) & 0x3f;
+      rr = (uint8_t) (((seg[pid].buffer[*off] & 3) << 2) | ((seg[pid].buffer[*off + 1] >> 6) & 3));
+      rb = (seg[pid].buffer[*off + 1] >> 2) & 0x0f;
+      rt = seg[pid].buffer[*off + 1] & 3;
+      *off += 2;
+      y = (uint8_t) (ry << 2);
+      cr = (uint8_t) (rr << 4);
+      cb = (uint8_t) (rb << 4);
+      t = (uint8_t) (rt << 6);
     }
-    // 2-bit/entry CLUT Flag (1 bit)
-    f2 = (segment[pid].buffer[*offset] >> 7) & 1;
-    fprintf (fo, "        2-bit/entry CLUT Flag (1 bit): %u\n", f2);
 
-    // 4-bit/entry CLUT Flag (1 bit)
-    f4 = (segment[pid].buffer[*offset] >> 6) & 1;
-    fprintf (fo, "        4-bit/entry CLUT Flag (1 bit): %u\n", f4);
+    fprintf (fo, "      CLUT Entry 0x%02x flags 2/4/8=%u/%u/%u full_range=%u Y/Cr/Cb/T=%u/%u/%u/%u\n", eid, f2, f4, f8, full, y, cr, cb, t);
+    rgba = rgba_from_ycbcr (y, cb, cr, t);
 
-    // 8-bit/entry CLUT Flag (1 bit)
-    f8 = (segment[pid].buffer[*offset] >> 5) & 1;
-    fprintf (fo, "        8-bit/entry CLUT Flag (1 bit): %u\n", f8);
-
-    // Reserved (4 bits)
-
-    // Full Range Flag (1 bit)
-    full_range_flag = segment[pid].buffer[*offset] & 1;
-    fprintf (fo, "        Full Range Flag (1 bit): %u\n", full_range_flag);
-
-    (*offset)++;
-    consumed++;
-
-    // Full Range Color and Transparency
-    if (full_range_flag) {
-
-      // Y (1 byte)
-      if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-        fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-        exit (EXIT_FAILURE);
-      }
-      y = segment[pid].buffer[*offset];
-      fprintf (fo, "        Y (1 byte) 0x%02x\n", y);
-      (*offset)++;
-      consumed++;
-
-      // Cr (1 byte)
-      if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-        fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-        exit (EXIT_FAILURE);
-      }
-      cr = segment[pid].buffer[*offset];
-      fprintf (fo, "        Cr (1 byte): 0x%02x\n", cr);
-      (*offset)++;
-      consumed++;
-
-      // Cb (1 byte)
-      if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-        fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-        exit (EXIT_FAILURE);
-      }
-      cb = segment[pid].buffer[*offset];
-      fprintf (fo, "        Cb (1 byte): 0x%02x\n", cb);
-      (*offset)++;
-      consumed++;
-
-      // Transparency (1 byte): 0 = opaque
-      if ((*offset) >= (MAX_BUFFERLEN + 1)) {
-        fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-        exit (EXIT_FAILURE);
-      }
-      t = segment[pid].buffer[*offset];
-      fprintf (fo, "        T (1 byte): 0x%02x\n", t);
-      (*offset)++;
-      consumed++;
-
-    } else {
-
-      if (((*offset) + 1) >= (MAX_BUFFERLEN + 1)) {
-        fprintf (stderr, "Unexpectedly reached end of segment in parse_cds().\n");
-        exit (EXIT_FAILURE);
-      }
-
-      // Y (6 bits)
-      y = (segment[pid].buffer[*offset] >> 2) & 0x3f;  // 0x3f = 0011 1111
-      fprintf (fo, "        Y (6 bits) 0x%02x\n", y);
-
-      // Cr (4 bits)
-      cr = ((segment[pid].buffer[*offset] & 0x03) << 2) |  // 0x03 = 0000 0011
-                                         ((segment[pid].buffer[(*offset) + 1] >> 6) & 0x03);
-      fprintf (fo, "        Cr (4 bits): 0x%02x\n", cr);
-
-      // Cb (4 bits)
-      cb = (segment[pid].buffer[(*offset) + 1] >> 2) & 0x0f;  // 0x0f = 0000 1111
-      fprintf (fo, "        Cb (4 bits): 0x%02x\n", cb);
-
-      // Transparency (2 bits)
-      t = segment[pid].buffer[(*offset) + 1] & 0x03;
-      fprintf (fo, "        T (2 bits): 0x%02x\n", t);
-
-      (*offset) += 2;
-      consumed += 2;
-
-    }  // End if full_range_flag
-
-    // 2-bit/entry CLUT
+    // Load the converted colour into whichever CLUT member(s) the entry flags
+    // identify, and mark those CLUTs as customized rather than default.
     if (f2) {
-
-      if (y != 0) {
-        YCbCr2RGB_bt601 (full_range_flag, (int) y, (int) cb, (int) cr, rgb);  // Convert YCbCr to 8-bit sRGB.
-        (*page)[page_idx].clut[clut_idx].clut2[clut_entry_id & 0x03].r = (uint8_t) rgb[0];
-        (*page)[page_idx].clut[clut_idx].clut2[clut_entry_id & 0x03].g = (uint8_t) rgb[1];
-        (*page)[page_idx].clut[clut_idx].clut2[clut_entry_id & 0x03].b = (uint8_t) rgb[2];
-        (*page)[page_idx].clut[clut_idx].clut2[clut_entry_id & 0x03].a = (uint8_t) (255 * (3 - t) / 3);  // Convert from transparency t to alpha a.
-      } else {
-        (*page)[page_idx].clut[clut_idx].clut2[clut_entry_id & 0x03].r = 0;  // R
-        (*page)[page_idx].clut[clut_idx].clut2[clut_entry_id & 0x03].g = 0;  // G
-        (*page)[page_idx].clut[clut_idx].clut2[clut_entry_id & 0x03].b = 0;  // B
-        (*page)[page_idx].clut[clut_idx].clut2[clut_entry_id & 0x03].a = 0;  // Alpha (fully transparent)
-      }
-      (*page)[page_idx].clut[clut_idx].state2 = 'c';  // Mark this CLUT as customized.
+      (*page)[pi].clut[ci].clut2[eid & 3] = rgba;
+      (*page)[pi].clut[ci].state2 = 'c';
     }
-
-    // 4-bit/entry CLUT
     if (f4) {
-
-      if (y != 0) {
-        YCbCr2RGB_bt601 (full_range_flag, (int) y, (int) cb, (int) cr, rgb);  // Convert YCbCr to 8-bit sRGB.
-        (*page)[page_idx].clut[clut_idx].clut4[clut_entry_id & 0x0f].r = (uint8_t) rgb[0];
-        (*page)[page_idx].clut[clut_idx].clut4[clut_entry_id & 0x0f].g = (uint8_t) rgb[1];
-        (*page)[page_idx].clut[clut_idx].clut4[clut_entry_id & 0x0f].b = (uint8_t) rgb[2];
-        (*page)[page_idx].clut[clut_idx].clut4[clut_entry_id & 0x0f].a = (uint8_t) (255 * (3 - t) / 3);  // Convert from transparency t to alpha a.
-      } else {
-        (*page)[page_idx].clut[clut_idx].clut4[clut_entry_id & 0x0f].r = 0;  // R
-        (*page)[page_idx].clut[clut_idx].clut4[clut_entry_id & 0x0f].g = 0;  // G
-        (*page)[page_idx].clut[clut_idx].clut4[clut_entry_id & 0x0f].b = 0;  // B
-        (*page)[page_idx].clut[clut_idx].clut4[clut_entry_id & 0x0f].a = 0;  // Alpha (fully transparent)
-      }
-      (*page)[page_idx].clut[clut_idx].state4 = 'c';  // Mark this CLUT as customized.
+      (*page)[pi].clut[ci].clut4[eid & 0x0f] = rgba;
+      (*page)[pi].clut[ci].state4 = 'c';
     }
-
-    // 8-bit/entry CLUT Flag (1 bit)
     if (f8) {
-
-      if (y != 0) {
-        YCbCr2RGB_bt601 (full_range_flag, (int) y, (int) cb, (int) cr, rgb);  // Convert YCbCr to 8-bit sRGB.
-        (*page)[page_idx].clut[clut_idx].clut8[clut_entry_id].r = (uint8_t) rgb[0];
-        (*page)[page_idx].clut[clut_idx].clut8[clut_entry_id].g = (uint8_t) rgb[1];
-        (*page)[page_idx].clut[clut_idx].clut8[clut_entry_id].b = (uint8_t) rgb[2];
-        (*page)[page_idx].clut[clut_idx].clut8[clut_entry_id].a = (uint8_t) (255 - t);  // Convert from transparency t to alpha a.
-      } else {
-        (*page)[page_idx].clut[clut_idx].clut8[clut_entry_id].r = 0;  // R
-        (*page)[page_idx].clut[clut_idx].clut8[clut_entry_id].g = 0;  // G
-        (*page)[page_idx].clut[clut_idx].clut8[clut_entry_id].b = 0;  // B
-        (*page)[page_idx].clut[clut_idx].clut8[clut_entry_id].a = 0;  // Alpha (fully transparent)
-      }
-      (*page)[page_idx].clut[clut_idx].state8 = 'c';  // Mark this CLUT as customized.
+      (*page)[pi].clut[ci].clut8[eid] = rgba;
+      (*page)[pi].clut[ci].state8 = 'c';
     }
-
-  }  // End while Entry loop
+  }
 
   return (EXIT_SUCCESS);
 }
