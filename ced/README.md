@@ -8,8 +8,6 @@ A command-line adaptation of Google's Compact Encoding Detection code for analyz
 make
 ```
 
-The included detector source builds cleanly with the warning flags enabled in the Makefile.
-
 ## Usage
 
 ```sh

@@ -16,8 +16,6 @@ The program invokes `chardet` and `iconv` directly as child processes; it does n
 make
 ```
 
-The included detector source builds cleanly with the warning flags enabled in the Makefile.
-
 ## Usage
 
 ```sh
