@@ -1,6 +1,6 @@
 # dvb
 
-Analyzes an isolated DVB subtitle stream carried in an MPEG-2 transport stream (`.ts`) and writes a report. It can optionally produce one bitmap per subtitle. Unlike the [VobSub](../sub/) and [PGS](../pgs/) tools, this program does not have the option to offset or synchronize timestamps because PTS and DTS timestamps are carried in PES packets which are, in turn, carried by transport-stream packets. i.e., there isn't visibility between layers.
+Analyzes an isolated DVB subtitle stream carried in an MPEG-2 transport stream (`.ts`) file and writes a report. It can optionally produce one bitmap per subtitle. Unlike the [VobSub](../sub/) and [PGS](../pgs/) tools, this program does not have the option to offset or synchronize timestamps because PTS and DTS timestamps are carried in PES packets which are, in turn, carried by transport-stream packets. i.e., there isn't visibility between layers.
 
 The input transport stream must contain only one DVB subtitle stream, without audio or video streams. Use FFmpeg to list all streams first:
 

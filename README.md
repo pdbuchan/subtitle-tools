@@ -33,7 +33,7 @@ Each tool has its own directory at the repository root. A single-file program ke
 | [`sub/`](sub/) | Analyze an `.idx`/`.sub` pair, extract subtitle bitmaps, or offset/synchronize timestamps. |
 | [`pgs/`](pgs/) | Analyze Blu-ray PGS `.sup` subtitles, extract subtitle bitmaps, or offset/synchronize timestamps. |
 | [`dvb/`](dvb/) | Analyze an isolated DVB subtitle stream in an MPEG-2 transport stream and optionally extract subtitle bitmaps. |
-| [`teletext/`](teletext/) | Analyze an isolated DVB Teletext stream in an MPEG-2 transport stream and optionally extract Lvel 1 Teletext. |
+| [`teletext/`](teletext/) | Analyze an isolated DVB Teletext stream in an MPEG-2 transport stream and optionally extract Level 1 Teletext. |
 
 ## Post-OCR Tool
 | Directory | Description |

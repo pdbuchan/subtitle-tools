@@ -1,6 +1,6 @@
 # teletext
 
-Analyzes an isolated DVB Teletext stream carried in an MPEG-2 transport stream (`.ts`) and writes a report. It can optionally produce a new directory containing text files containing snapshots of Level 1 Teletext as UTF-8 (see discussion below for more).
+Analyzes an isolated DVB Teletext stream carried in an MPEG-2 transport stream (`.ts`) file and writes a report. It can optionally produce a new directory containing snapshot text files of Level 1 Teletext as UTF-8 (see discussion below for more).
 
 The input transport stream must contain only one DVB Teletext stream, without audio or video streams. Use FFmpeg to list all streams first:
 
