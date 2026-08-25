@@ -41,7 +41,9 @@ make
 ./teletext filename.ts [text]
 ```
 
-The report filename is `teletext.out`. With the `text` option, a `teletext_pages/` directory is created and populated with text files of Level 1 Teletext text snapshots as UTF-8. Existing output files are not overwritten.
+The report filename is `teletext.out`.
+
+With the `text` option, a `teletext_pages/` directory is created and populated with text files of Level 1 Teletext text snapshots as UTF-8. Existing output files are not overwritten.
 
 Note that the report file `teletext.out` can be approximately 10 times larger than the MPEG-2 stream (.ts) file.
 
