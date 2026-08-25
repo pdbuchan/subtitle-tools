@@ -59,6 +59,7 @@ int byteordermark (char *, BOM *);
 int searchandreplace (char **, const char *, const char *);
 void append_string (char **, const char *);
 void append_missing_closures (char **, int);
+static void *allocate_mem (size_t, size_t, const char *);
 char *allocate_strmem (size_t);
 char **allocate_strmemp (size_t);
 BOM *allocate_bommem (size_t);
@@ -853,62 +854,39 @@ append_string (char **string, const char *suffix) {
   *string = tmp;
 }
 
-// Allocate memory for an array of chars.
-char *
-allocate_strmem (size_t len) {
+static void *
+allocate_mem (size_t len, size_t item_size, const char *name) {
 
-  char *tmp;
+  void *tmp;
 
-  if (len == 0u) {
-    fprintf (stderr, "ERROR: Cannot allocate zero bytes in allocate_strmem().\n");
+  if (len == 0 || item_size == 0 || len > (SIZE_MAX / item_size)) {
+    fprintf (stderr, "Cannot allocate memory for %s: invalid size in allocate_mem().\n", name);
     exit (EXIT_FAILURE);
   }
 
-  tmp = calloc (len, sizeof (*tmp));
+  tmp = calloc (len, item_size);
   if (tmp == NULL) {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
+    fprintf (stderr, "Cannot allocate memory for %s in allocate_mem().\n", name);
     exit (EXIT_FAILURE);
   }
 
   return (tmp);
+}
+
+// Allocate memory for an array of chars (i.e., a character string).
+char *
+allocate_strmem (size_t len) {
+  return (allocate_mem (len, sizeof (char), "array of chars"));
 }
 
 // Allocate memory for an array of pointers to arrays of chars.
 char **
 allocate_strmemp (size_t len) {
-
-  char **tmp;
-
-  if (len == 0u) {
-    fprintf (stderr, "ERROR: Cannot allocate zero pointers in allocate_strmemp().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = calloc (len, sizeof (*tmp));
-  if (tmp == NULL) {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmemp().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  return (tmp);
+  return (allocate_mem (len, sizeof (char *), "array of pointers to arrays of chars"));
 }
 
 // Allocate memory for an array of BOM structs.
 BOM *
 allocate_bommem (size_t len) {
-
-  BOM *tmp;
-
-  if (len == 0u) {
-    fprintf (stderr, "ERROR: Cannot allocate zero BOM structs in allocate_bommem().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = calloc (len, sizeof (*tmp));
-  if (tmp == NULL) {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_bommem().\n");
-    exit (EXIT_FAILURE);
-  }
-
-  return (tmp);
+  return (allocate_mem (len, sizeof (BOM), "array of BOM structs"));
 }

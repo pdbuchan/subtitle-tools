@@ -52,9 +52,10 @@ int extract_time (char *, TIME *, TIME *);
 int parsetimestamp (char *, TIME *);
 int timetoms (TIME *);
 int mstotime (TIME *);
-char *allocate_strmem (int);
-char **allocate_strmemp (int);
-TIME *allocate_timemem (int);
+static void *allocate_mem (size_t, size_t, const char *);
+char *allocate_strmem (size_t);
+char **allocate_strmemp (size_t);
+TIME *allocate_timemem (size_t);
 
 // Set some symbolic constants.
 #define MAXLEN 1024  // Maximum number of characters in a physical input line
@@ -670,62 +671,39 @@ mstotime (TIME *time) {
   return (EXIT_SUCCESS);
 }
 
-// Allocate memory for an array of chars.
-char *
-allocate_strmem (int len) {
+static void *
+allocate_mem (size_t len, size_t item_size, const char *name) {
 
   void *tmp;
 
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
+  if (len == 0 || item_size == 0 || len > (SIZE_MAX / item_size)) {
+    fprintf (stderr, "Cannot allocate memory for %s: invalid size in allocate_mem().\n", name);
     exit (EXIT_FAILURE);
   }
 
-  tmp = calloc ((size_t) len, sizeof (char));
-  if (tmp != NULL) {
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");
+  tmp = calloc (len, item_size);
+  if (tmp == NULL) {
+    fprintf (stderr, "Cannot allocate memory for %s in allocate_mem().\n", name);
     exit (EXIT_FAILURE);
   }
+
+  return (tmp);
+}
+
+// Allocate memory for an array of chars (i.e., a character string).
+char *
+allocate_strmem (size_t len) {
+  return (allocate_mem (len, sizeof (char), "array of chars"));
 }
 
 // Allocate memory for an array of pointers to arrays of chars.
 char **
-allocate_strmemp (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmemp().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = calloc ((size_t) len, sizeof (char *));
-  if (tmp != NULL) {
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmemp().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_strmemp (size_t len) {
+  return (allocate_mem (len, sizeof (char *), "array of pointers to arrays of chars"));
 }
 
 // Allocate memory for an array of TIME structs.
 TIME *
-allocate_timemem (int len) {
-
-  void *tmp;
-
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_timemem().\n", len);
-    exit (EXIT_FAILURE);
-  }
-
-  tmp = calloc ((size_t) len, sizeof (TIME));
-  if (tmp != NULL) {
-    return (tmp);
-  } else {
-    fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_timemem().\n");
-    exit (EXIT_FAILURE);
-  }
+allocate_timemem (size_t len) {
+  return (allocate_mem (len, sizeof (TIME), "array of TIME structs"));
 }

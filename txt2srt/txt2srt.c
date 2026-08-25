@@ -716,7 +716,7 @@ free_lines (char **lines, size_t nlines) {
   free (lines);
 }
 
-// Allocate zero-initialized memory and terminate on failure.
+// Allocate memory for array of type voids.
 void *
 allocate_memory (size_t nmemb, size_t size) {
 

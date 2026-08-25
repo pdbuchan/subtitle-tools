@@ -16,66 +16,57 @@
 
 #include "dvb.h"
 
-// Allocate a zero-filled block after first checking that count * size cannot
-// overflow size_t. The small public allocation functions below all use this
-// helper so allocation failures are handled consistently.
 static void *
-allocate_zeroed (size_t count, size_t size, const char *name) {
+allocate_mem (size_t len, size_t item_size, const char *name) {
 
-  void *p;
+  void *tmp;
 
-  if (!count || !size || count > SIZE_MAX / size) {
-    fprintf (stderr, "Invalid allocation size for %s.\n", name);
+  if (len == 0 || item_size == 0 || len > (SIZE_MAX / item_size)) {
+    fprintf (stderr, "Cannot allocate memory for %s: invalid size in allocate_mem().\n", name);
     exit (EXIT_FAILURE);
   }
 
-  p = calloc (count, size);
-  if (!p) {
-    fprintf (stderr, "Cannot allocate memory for %s.\n", name);
+  tmp = calloc (len, item_size);
+  if (tmp == NULL) {
+    fprintf (stderr, "Cannot allocate memory for %s in allocate_mem().\n", name);
     exit (EXIT_FAILURE);
   }
 
-  return (p);
+  return (tmp);
 }
 
 // Allocate memory for an array of uint8_t.
 uint8_t *
-allocate_u8mem (size_t n) {
-
-  return (allocate_zeroed (n, sizeof (uint8_t), "uint8_t array"));
+allocate_u8mem (size_t len) {
+  return (allocate_mem (len, sizeof (uint8_t), "array of uint8_t"));
 }
 
-// Allocate memory for an array of chars.
+// Allocate memory for an array of chars (i.e., a character string).
 char *
-allocate_strmem (size_t n) {
-
-  return (allocate_zeroed (n, sizeof (char), "character string"));
+allocate_strmem (size_t len) {
+  return (allocate_mem (len, sizeof (char), "array of chars"));
 }
 
 // Allocate memory for an array of size_t.
 size_t *
-allocate_sizemem (size_t n) {
-
-  return (allocate_zeroed (n, sizeof (size_t), "size_t array"));
+allocate_sizemem (size_t len) {
+  return (allocate_mem (len, sizeof (size_t), "array of size_t"));
 }
 
 // Allocate memory for an array of PROGRAM structs.
 PROGRAM *
-allocate_progmem (size_t n) {
-
-  return (allocate_zeroed (n, sizeof (PROGRAM), "PROGRAM array"));
+allocate_progmem (size_t len) {
+  return (allocate_mem (len, sizeof (PROGRAM), "array of PROGRAM structs"));
 }
 
 // Allocate memory for an array of SECTION structs.
 SECTION *
-allocate_sectionmem (size_t n) {
-
-  return (allocate_zeroed (n, sizeof (SECTION), "SECTION array"));
+allocate_sectionmem (size_t len) {
+  return (allocate_mem (len, sizeof (SECTION), "array of SECTION structs"));
 }
 
 // Allocate memory for an array of SEGMENT structs.
 SEGMENT *
-allocate_segmentmem (size_t n) {
-
-  return (allocate_zeroed (n, sizeof (SEGMENT), "SEGMENT array"));
+allocate_segmentmem (size_t len) {
+  return (allocate_mem (len, sizeof (SEGMENT), "array of SEGMENT structs"));
 }

@@ -35,7 +35,7 @@
 int inputtext (char *);
 double mstoclock (double, double *, double *, double *);
 double clocktoms (double *, double, double, double);
-char *allocate_strmem (int);
+char *allocate_strmem (size_t);
 
 // Set some symbolic constants.
 #define MAX_STRINGLEN 256  // Maximum number of characters per line
@@ -251,18 +251,17 @@ clocktoms (double *totalms, double hh, double mm, double ss) {
 
 // Allocate memory for an array of chars.
 char *
-allocate_strmem (int len) {
+allocate_strmem (size_t len) {
 
   void *tmp;
 
-  if (len <= 0) {
-    fprintf (stderr, "ERROR: Cannot allocate memory because len = %i in allocate_strmem().\n", len);
+  if (len == 0) {
+    fprintf (stderr, "ERROR: Cannot allocate memory because len = %zu in allocate_strmem().\n", len);
     exit (EXIT_FAILURE);
   }
 
-  tmp = (char *) malloc (len * sizeof (char));
+  tmp = calloc (len, sizeof (char));
   if (tmp != NULL) {
-    memset (tmp, 0, len * sizeof (char));
     return (tmp);
   } else {
     fprintf (stderr, "ERROR: Cannot allocate memory for array in allocate_strmem().\n");

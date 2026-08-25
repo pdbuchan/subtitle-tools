@@ -17,50 +17,56 @@
 #include "pgs.h"
 
 static void *
-allocate_zeroed (size_t len, size_t item_size, const char *name) {
+allocate_mem (size_t len, size_t item_size, const char *name) {
 
   void *tmp;
 
-  if (len == 0 || item_size == 0 || len > SIZE_MAX / item_size) {
-    fprintf (stderr, "Cannot allocate memory for %s: invalid size.\n", name);
+  if (len == 0 || item_size == 0 || len > (SIZE_MAX / item_size)) {
+    fprintf (stderr, "Cannot allocate memory for %s: invalid size in allocate_mem().\n", name);
     exit (EXIT_FAILURE);
   }
-
+  
   tmp = calloc (len, item_size);
   if (tmp == NULL) {
-    fprintf (stderr, "Cannot allocate memory for %s.\n", name);
+    fprintf (stderr, "Cannot allocate memory for %s in allocate_mem().\n", name);
     exit (EXIT_FAILURE);
-  }
+  } 
 
-  return tmp;
+  return (tmp);
 }
 
+// Allocate memory for an array of chars (i.e., a character string).
 char *
 allocate_strmem (size_t len) {
-  return allocate_zeroed (len, sizeof (char), "character array");
+  return (allocate_mem (len, sizeof (char), "array of chars"));
 }
 
+// Allocate memory for an array of PALETTE structs.
 PALETTE *
 allocate_pdsmem (size_t len) {
-  return allocate_zeroed (len, sizeof (PALETTE), "PALETTE array");
+  return (allocate_mem (len, sizeof (PALETTE), "array of PALETTE structs"));
 }
 
+// Allocate memory for an array of PALETTE_ENTRY structs.
 PALETTE_ENTRY *
 allocate_palentrymem (size_t len) {
-  return allocate_zeroed (len, sizeof (PALETTE_ENTRY), "PALETTE_ENTRY array");
+  return (allocate_mem (len, sizeof (PALETTE_ENTRY), "array of PALETTE_ENTRY structs"));
 }
 
+// Allocate memory for an array of SYNC structs.
 SYNC *
 allocate_syncmem (size_t len) {
-  return allocate_zeroed (len, sizeof (SYNC), "SYNC array");
+  return (allocate_mem (len, sizeof (SYNC), "array of SYNC structs"));
 }
 
+// Allocate memory for an array of OBJECT structs.
 OBJECT *
 allocate_objmem (size_t len) {
-  return allocate_zeroed (len, sizeof (OBJECT), "OBJECT array");
+  return (allocate_mem (len, sizeof (OBJECT), "array of OBJECT structs"));
 }
 
+// Allocate memory for an array of CHANGE structs.
 CHANGE *
 allocate_changemem (size_t len) {
-  return allocate_zeroed (len, sizeof (CHANGE), "CHANGE array");
+  return (allocate_mem (len, sizeof (CHANGE), "array of CHANGE structs"));
 }
