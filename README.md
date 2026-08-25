@@ -79,6 +79,11 @@ It is difficult to automatically reinstate any stripped in-line markup tags from
 | [`ssa2srt/`](ssa2srt/) | Convert SubStation Alpha subtitles to SubRip while transferring supported styles and markup. |
 | [`ssa2srt-nostyles/`](ssa2srt-nostyles/) | Convert SubStation Alpha subtitles to SubRip without transferring style definitions. |
 
+## WebVTT Tool
+| Directory | Description |
+|---|---|
+| [`teletext/`](teletext/) | Analyze an isolated DVB Teletext stream in an MPEG-2 transport stream and optionally extract Lvel 1 Teletext. |
+
 ## Byte Order Mark Tools
 | Directory | Description |
 |---|---|
