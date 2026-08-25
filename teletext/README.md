@@ -23,7 +23,7 @@ Input #0, mpegts, from feature.ts:
   Stream #0:6[0x7e0](888,dut): Subtitle: dvb_subtitle ([6][0][0][0] / 0x0006) (hearing impaired)
 ```
 
-In this case there is one Dutch DVB Teletext stream: #`0:4`. You can then extract only the desired DVB Teletext stream. In this case let's use Stream #`0:4`.
+In this case there is one Dutch DVB Teletext stream: #`0:4`. You can then extract only the desired DVB Teletext stream:
 
 ```sh
 ffmpeg -i feature.ts -map 0:4 -c:s copy filename.ts
@@ -41,9 +41,9 @@ make
 ./teletext filename.ts [text]
 ```
 
-The report filename is `teletext.out`. With the `text` option, a `teletext/` directory is created and populated with text files of Level 1 Teletext text snapshots as UTF-8. Existing output files are not overwritten.
+The report filename is `teletext.out`. With the `text` option, a `teletext_pages/` directory is created and populated with text files of Level 1 Teletext text snapshots as UTF-8. Existing output files are not overwritten.
 
-The report file `teletext.out` can be approximately 10 times larger than the MPEG-2 stream (.ts) file.
+Note that the report file `teletext.out` can be approximately 10 times larger than the MPEG-2 stream (.ts) file.
 
 ## Why the extracted text is split into multiple files
 
