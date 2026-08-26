@@ -23,7 +23,7 @@
 //          do require they appear in chronological order in the srt file.
 //          The SubRip output file is not corrected for this.
 
-// gcc -Wall ssa2srt.c -o ssa2srt
+// gcc -Wall ssa2srt.c -o ssa2srt -lm
 
 // Run without command line arguments to see usage notes.
 // Output: out.srt
