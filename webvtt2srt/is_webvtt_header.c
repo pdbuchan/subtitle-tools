@@ -18,30 +18,19 @@
 
 // Determine whether a line is a valid WEBVTT file header.
 //
-// An optional UTF-8 byte-order mark is accepted before WEBVTT. WebVTT also
-// permits header text after the signature when it is separated by a space or
-// tab.
+// BOM handling is deliberately performed on raw input bytes before readline()
+// is called. WebVTT permits optional header text after the WEBVTT signature when
+// it is separated from the signature by a space or tab.
 int
 is_webvtt_header (const char *text) {
 
   size_t length;
-  int result;
-  static const unsigned char bom[] = {0xefU, 0xbbU, 0xbfU};
-  const unsigned char *p;
 
   if (text == NULL) {
     return (0);
   }
 
   length = strlen (text);
-  p = (const unsigned char *) text;
-
-  // A UTF-8 BOM is legal before the WEBVTT signature. Skip it for the
-  // signature test while retaining the original input string unchanged.
-  if ((length >= 3u) && (p[0] == bom[0]) && (p[1] == bom[1]) && (p[2] == bom[2])) {
-    text += 3;
-    length -= 3u;
-  }
 
   // The required signature consists of the six literal characters WEBVTT.
   if ((length < 6u) || (strncmp (text, "WEBVTT", 6u) != 0)) {
@@ -50,7 +39,5 @@ is_webvtt_header (const char *text) {
 
   // If header text follows the signature, the WebVTT syntax requires it to
   // be separated from WEBVTT by a space or tab.
-  result = (length == 6u) || (text[6] == ' ') || (text[6] == '\t');
-
-  return (result);
+  return ((length == 6u) || (text[6] == ' ') || (text[6] == '\t'));
 }

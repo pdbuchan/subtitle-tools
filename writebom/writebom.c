@@ -30,8 +30,7 @@
 
 // Set some symbolic constants.
 #define MAX_STRINGLEN 256  // Maximum number of characters read from standard input
-#define MAXBOM 11          // Number of recognized Byte Order Mark (BOM) types
-#define MAX_BOM_BYTES 4    // Maximum number of bytes in a recognized BOM
+#define BOM_BUFFER_SIZE 4  // Maximum number of bytes in a recognized BOM
 #define COPY_BUFSIZE 8192  // Buffer size used when copying the input file
 
 // Definition of structs.
@@ -43,31 +42,37 @@ typedef struct {
 
 // Function prototypes.
 int inputtext (char *);
-int parse_choice (const char *, int *);
-int byteordermark (const uint8_t *, size_t, const BOM *);
+int parse_choice (const char *, int *, size_t);
+int byteordermark (const uint8_t *, size_t, const BOM *, size_t);
 int copy_stream (FILE *, FILE *);
 
 // Byte Order Mark (BOM) sequences.
-static const uint8_t utf8[]      = {0xef, 0xbb, 0xbf};
-static const uint8_t utf16be[]   = {0xfe, 0xff};
-static const uint8_t utf16le[]   = {0xff, 0xfe};
-static const uint8_t utf32be[]   = {0x00, 0x00, 0xfe, 0xff};
-static const uint8_t utf32le[]   = {0xff, 0xfe, 0x00, 0x00};
-static const uint8_t utf7[]      = {0x2b, 0x2f, 0x76};
-static const uint8_t utf1[]      = {0xf7, 0x64, 0x4c};
-static const uint8_t utfebcdic[] = {0xdd, 0x73, 0x66, 0x73};
-static const uint8_t scsu[]      = {0x0e, 0xfe, 0xff};
-static const uint8_t bocu1[]     = {0xfb, 0xee, 0x28};
-static const uint8_t gb18030[]   = {0x84, 0x31, 0x95, 0x33};
+static const uint8_t utf8[]       = {0xef, 0xbb, 0xbf};
+static const uint8_t utf16be[]    = {0xfe, 0xff};
+static const uint8_t utf16le[]    = {0xff, 0xfe};
+static const uint8_t utf32be[]    = {0x00, 0x00, 0xfe, 0xff};
+static const uint8_t utf32le[]    = {0xff, 0xfe, 0x00, 0x00};
+static const uint8_t utf7_1[]     = {0x2b, 0x2f, 0x76, 0x38};  // +/v8
+static const uint8_t utf7_2[]     = {0x2b, 0x2f, 0x76, 0x39};  // +/v9
+static const uint8_t utf7_3[]     = {0x2b, 0x2f, 0x76, 0x2b};  // +/v+
+static const uint8_t utf7_4[]     = {0x2b, 0x2f, 0x76, 0x2f};  // +/v/
+static const uint8_t utf1[]       = {0xf7, 0x64, 0x4c};
+static const uint8_t utfebcdic[]  = {0xdd, 0x73, 0x66, 0x73};
+static const uint8_t scsu[]       = {0x0e, 0xfe, 0xff};
+static const uint8_t bocu1[]      = {0xfb, 0xee, 0x28};
+static const uint8_t gb18030[]    = {0x84, 0x31, 0x95, 0x33};
 
 // Table of recognized Byte Order Marks.
-static const BOM bom[MAXBOM] = {
+static const BOM bom[] = {
   {sizeof (utf8),      "UTF-8",        utf8},
   {sizeof (utf16be),   "UTF-16 (BE)",  utf16be},
   {sizeof (utf16le),   "UTF-16 (LE)",  utf16le},
   {sizeof (utf32be),   "UTF-32 (BE)",  utf32be},
   {sizeof (utf32le),   "UTF-32 (LE)",  utf32le},
-  {sizeof (utf7),      "UTF-7",        utf7},
+  {sizeof (utf7_1),    "UTF-7",        utf7_1},
+  {sizeof (utf7_2),    "UTF-7",        utf7_2},
+  {sizeof (utf7_3),    "UTF-7",        utf7_3},
+  {sizeof (utf7_4),    "UTF-7",        utf7_4},
   {sizeof (utf1),      "UTF-1",        utf1},
   {sizeof (utfebcdic), "UTF-EBCDIC",   utfebcdic},
   {sizeof (scsu),      "SCSU",         scsu},
@@ -75,13 +80,15 @@ static const BOM bom[MAXBOM] = {
   {sizeof (gb18030),   "GB18030",      gb18030}
 };
 
+static const size_t nbom = sizeof (bom) / sizeof (bom[0]);
+
 int
 main (int argc, char **argv) {
 
-  int i, type, choice, status;
+  int type, choice, status;
   char temp[MAX_STRINGLEN];
-  uint8_t input[MAX_BOM_BYTES];
-  size_t nread;
+  uint8_t input[BOM_BUFFER_SIZE];
+  size_t i, nread;
   const char *filename;
   FILE *fi, *fo;
 
@@ -96,14 +103,23 @@ main (int argc, char **argv) {
 
   // Ask which BOM should be prepended if the input does not already have one.
   fprintf (stdout, "\nChoose Byte Order Mark (BOM) to apply to file %s:\n\n", filename);
-  for (i = 0; i < MAXBOM; i++) {
-    fprintf (stdout, "%i = %s\n", i + 1, bom[i].name);
+  for (i=0u; i<nbom; i++) {
+    fprintf (stdout, "%zu = %s", i + 1u, bom[i].name);
+
+    // UTF-7 has four distinct BOM signatures. Show the actual signature so the
+    // user can select the intended form rather than seeing four identical rows.
+    if ((i >= 5u) && (i <= 8u)) {
+      fprintf (stdout, " (%c%c%c%c)", bom[i].sequence[0], bom[i].sequence[1],
+               bom[i].sequence[2], bom[i].sequence[3]);
+    }
+
+    fputc ('\n', stdout);
   }
 
   fprintf (stdout, "\nChoice? ");
   memset (temp, 0, sizeof (temp));
   inputtext (temp);
-  if (parse_choice (temp, &choice) != EXIT_SUCCESS) {
+  if (parse_choice (temp, &choice, nbom) != EXIT_SUCCESS) {
     return (EXIT_FAILURE);
   }
 
@@ -129,7 +145,7 @@ main (int argc, char **argv) {
 
   // Detect an existing BOM. The detector chooses the longest complete match,
   // which prevents UTF-32LE from being mistaken for its UTF-16LE prefix.
-  type = byteordermark (input, nread, bom);
+  type = byteordermark (input, nread, bom, nbom);
   if (type >= 0) {
     fprintf (stdout, "\nExisting Byte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
     fprintf (stdout, "No action taken.\n\n");
@@ -266,12 +282,12 @@ inputtext (char *text) {
 // Parse a menu choice. Leading and trailing white space is allowed, but other
 // trailing characters are rejected.
 int
-parse_choice (const char *text, int *choice) {
+parse_choice (const char *text, int *choice, size_t nchoices) {
 
   char *endptr;
   long value;
 
-  if ((text == NULL) || (choice == NULL)) {
+  if ((text == NULL) || (choice == NULL) || (nchoices == 0u)) {
     fprintf (stderr, "ERROR: Invalid argument supplied to parse_choice().\n");
     return (EXIT_FAILURE);
   }
@@ -292,8 +308,8 @@ parse_choice (const char *text, int *choice) {
     return (EXIT_FAILURE);
   }
 
-  if ((value < 1L) || (value > (long) MAXBOM)) {
-    fprintf (stderr, "ERROR: Choice must be between 1 and %d.\n", MAXBOM);
+  if ((value < 1L) || ((size_t) value > nchoices)) {
+    fprintf (stderr, "ERROR: Choice must be between 1 and %zu.\n", nchoices);
     return (EXIT_FAILURE);
   }
 
@@ -301,29 +317,35 @@ parse_choice (const char *text, int *choice) {
   return (EXIT_SUCCESS);
 }
 
-// Detect a Byte Order Mark (BOM), if one exists at the beginning of text.
-// Return the index of the longest complete matching BOM, or -1 if none of the
-// listed BOMs matches. nbytes is the actual number of bytes available in text.
+// Detect a Byte Order Mark (BOM), if one exists at the beginning of the file.
+// If more than one signature is a prefix of the input, return the longest
+// matching signature. This prevents UTF-32 LE (ff fe 00 00), for example,
+// from being mistaken for UTF-16 LE (ff fe).
+// Return the index of the matching bom array entry, or -1 if none matches.
 int
-byteordermark (const uint8_t *text, size_t nbytes, const BOM *table) {
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *table, size_t ntypes) {
 
+  size_t type, best_len;
   int best;
-  size_t type, bestlen;
 
   if ((text == NULL) || (table == NULL)) {
     return (-1);
   }
 
   best = -1;
-  bestlen = 0u;
+  best_len = 0u;
 
-  for (type = 0u; type < (size_t) MAXBOM; type++) {
+  for (type=0u; type<ntypes; type++) {
 
-    if ((table[type].len <= nbytes) && (table[type].len > bestlen)) {
-      if (memcmp (text, table[type].sequence, table[type].len) == 0) {
-        best = (int) type;
-        bestlen = table[type].len;
-      }
+    // The file must contain the complete signature.
+    if (table[type].len > nbytes) {
+      continue;
+    }
+
+    if ((table[type].len > best_len) &&
+        (memcmp (text, table[type].sequence, table[type].len) == 0)) {
+      best = (int) type;
+      best_len = table[type].len;
     }
   }
 

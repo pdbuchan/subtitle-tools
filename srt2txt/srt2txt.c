@@ -29,44 +29,68 @@
 
 // Definition of structs
 typedef struct {
-  int len;
+  size_t len;
   const char *name;
   const uint8_t *sequence;
 } BOM;
 
 // Function prototypes
 int readline (FILE *, char *, int);
-int byteordermark (const char *, const BOM *);
+int byteordermark (const uint8_t *, size_t, const BOM *, size_t);
 static void *allocate_mem (size_t, size_t, const char *);
 char *allocate_strmem (size_t);
 char **allocate_strmemp (size_t);
 
 // Set some symbolic constants.
 #define MAXLEN 256  // Maximum number of characters per line
-#define MAXBOM 11  // Maximum number of Byte Order Mark (BOM) types
+
+// Byte Order Marks are at most four bytes long in the table below.
+#define BOM_BUFFER_SIZE 4
+
+// Byte Order Mark (BOM) names and sequences.
+static const uint8_t utf8[]       = {0xef, 0xbb, 0xbf};
+static const uint8_t utf16be[]    = {0xfe, 0xff};
+static const uint8_t utf16le[]    = {0xff, 0xfe};
+static const uint8_t utf32be[]    = {0x00, 0x00, 0xfe, 0xff};
+static const uint8_t utf32le[]    = {0xff, 0xfe, 0x00, 0x00};
+static const uint8_t utf7_1[]     = {0x2b, 0x2f, 0x76, 0x38};
+static const uint8_t utf7_2[]     = {0x2b, 0x2f, 0x76, 0x39};
+static const uint8_t utf7_3[]     = {0x2b, 0x2f, 0x76, 0x2b};
+static const uint8_t utf7_4[]     = {0x2b, 0x2f, 0x76, 0x2f};
+static const uint8_t utf1[]       = {0xf7, 0x64, 0x4c};
+static const uint8_t utfebcdic[]  = {0xdd, 0x73, 0x66, 0x73};
+static const uint8_t scsu[]       = {0x0e, 0xfe, 0xff};
+static const uint8_t bocu1[]      = {0xfb, 0xee, 0x28};
+static const uint8_t gb18030[]    = {0x84, 0x31, 0x95, 0x33};
+
+static const BOM boms[] = {
+  {sizeof (utf8),      "UTF-8",        utf8},
+  {sizeof (utf16be),   "UTF-16 (BE)",  utf16be},
+  {sizeof (utf16le),   "UTF-16 (LE)",  utf16le},
+  {sizeof (utf32be),   "UTF-32 (BE)",  utf32be},
+  {sizeof (utf32le),   "UTF-32 (LE)",  utf32le},
+  {sizeof (utf7_1),    "UTF-7",        utf7_1},
+  {sizeof (utf7_2),    "UTF-7",        utf7_2},
+  {sizeof (utf7_3),    "UTF-7",        utf7_3},
+  {sizeof (utf7_4),    "UTF-7",        utf7_4},
+  {sizeof (utf1),      "UTF-1",        utf1},
+  {sizeof (utfebcdic), "UTF-EBCDIC",   utfebcdic},
+  {sizeof (scsu),      "SCSU",         scsu},
+  {sizeof (bocu1),     "BOCU-1",       bocu1},
+  {sizeof (gb18030),   "GB18030",      gb18030}
+};
+
+static const size_t nbom = sizeof (boms) / sizeof (boms[0]);
 
 int
 main (int argc, char **argv) {
 
   int type, status, alllines, nlines, line, nsubs, sub, nospace;
+  size_t nread;
   const char *filename;
   char temp[MAXLEN], **input;
+  uint8_t bom_buffer[BOM_BUFFER_SIZE] = {0};
   FILE *fi, *fo;
-
-  // Byte Order Mark (BOM) names and sequences.
-  static const char *const name[MAXBOM] = {"UTF-8", "UTF-16 (BE)", "UTF-16 (LE)", "UTF-32 (BE)", "UTF-32 (LE)", "UTF-7", "UTF-1", "UTF-EBCDIC", "SCSU", "BOCU-1", "GB18030"};
-  static const uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
-  static const uint8_t utf16be[2]    = {0xfe, 0xff};
-  static const uint8_t utf16le[2]    = {0xff, 0xfe};
-  static const uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
-  static const uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
-  static const uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
-  static const uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
-  static const uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
-  static const uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
-  static const uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
-  static const uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
-  BOM bom[MAXBOM];
 
   // Process the command line arguments, if any.
   nospace = 0;  // Default to leaving a blank line between text of each subtitle.
@@ -83,25 +107,45 @@ main (int argc, char **argv) {
     return (EXIT_SUCCESS);
   }
 
-  // Populate array with Byte Order Mark data.
-  bom[0].len = 3;    bom[0].name = name[0];    bom[0].sequence = utf8;
-  bom[1].len = 2;    bom[1].name = name[1];    bom[1].sequence = utf16be;
-  bom[2].len = 2;    bom[2].name = name[2];    bom[2].sequence = utf16le;
-  bom[3].len = 4;    bom[3].name = name[3];    bom[3].sequence = utf32be;
-  bom[4].len = 4;    bom[4].name = name[4];    bom[4].sequence = utf32le;
-  bom[5].len = 3;    bom[5].name = name[5];    bom[5].sequence = utf7;
-  bom[6].len = 3;    bom[6].name = name[6];    bom[6].sequence = utf1;
-  bom[7].len = 4;    bom[7].name = name[7];    bom[7].sequence = utfebcdic;
-  bom[8].len = 3;    bom[8].name = name[8];    bom[8].sequence = scsu;
-  bom[9].len = 3;    bom[9].name = name[9];    bom[9].sequence = bocu1;
-  bom[10].len = 4;   bom[10].name = name[10];  bom[10].sequence = gb18030;
-
   fprintf (stdout, "\nInput file: %s\n", filename);
 
-  // Open existing SubRip file.
-  fi = fopen (filename, "r");
+  // Open existing SubRip file in binary mode so BOM bytes are examined exactly.
+  fi = fopen (filename, "rb");
   if (fi == NULL) {
     fprintf (stderr, "ERROR: Unable to open input SubRip file %s.\n", filename);
+    return (EXIT_FAILURE);
+  }
+
+  // Examine the beginning of the file for a BOM before parsing any SubRip
+  // lines. A short file is valid input and may still contain a complete BOM.
+  nread = fread (bom_buffer, sizeof (bom_buffer[0]), BOM_BUFFER_SIZE, fi);
+  if (ferror (fi)) {
+    fprintf (stderr, "ERROR: Unable to examine input SubRip file %s for a Byte Order Mark.\n", filename);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+
+  // Detect a BOM at the beginning of the file.
+  type = byteordermark (bom_buffer, nread, boms, nbom);
+  if (type < 0) {
+    fprintf (stdout, "\nNo known Byte Order Mark (BOM) found in %s.\n", filename);
+  } else {
+    fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n", boms[type].name);
+
+    // This program parses SubRip syntax byte-by-byte. UTF-8 is compatible with
+    // that processing; the other BOM-marked encodings require decoding first.
+    if (type != 0) {
+      fprintf (stderr, "ERROR: Character encoding %s is not supported by this byte-oriented SubRip parser.\n", boms[type].name);
+      fclose (fi);
+      return (EXIT_FAILURE);
+    }
+  }
+
+  // Position the stream at the first subtitle byte. Skip an accepted UTF-8 BOM;
+  // otherwise return to the beginning of the file.
+  if (fseek (fi, (type == 0) ? (long) boms[type].len : 0L, SEEK_SET) != 0) {
+    fprintf (stderr, "ERROR: Unable to position input SubRip file %s after BOM detection.\n", filename);
+    fclose (fi);
     return (EXIT_FAILURE);
   }
 
@@ -132,8 +176,9 @@ main (int argc, char **argv) {
 
   fprintf (stdout, "\n%i lines found including any excess trailing line-feeds.\n", alllines);
 
-  if (fseek (fi, 0L, SEEK_SET) != 0) {
-    fprintf (stderr, "ERROR: Unable to rewind input SubRip file %s.\n", filename);
+  // Return to the first subtitle byte for the second input pass.
+  if (fseek (fi, (type == 0) ? (long) boms[type].len : 0L, SEEK_SET) != 0) {
+    fprintf (stderr, "ERROR: Unable to reposition input SubRip file %s.\n", filename);
     fclose (fi);
     return (EXIT_FAILURE);
   }
@@ -180,21 +225,6 @@ main (int argc, char **argv) {
     }
   }
   fprintf (stdout, "%i lines found excluding excess trailing line-feeds.\n", nlines);
-
-  // Detect any Byte Order Mark (BOM) at beginning of first line.
-  type = byteordermark (input[0], bom);
-  if (type < 0) {
-    fprintf (stdout, "\nNo known Byte Order Mark (BOM) found in %s.\n", filename);
-  } else {
-    fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
-
-    // This program parses SubRip syntax as single-byte/UTF-8 text. Other
-    // BOM-marked encodings must be converted before they can be processed.
-    if (type != 0) {
-      fprintf (stderr, "ERROR: Character encoding %s is not supported by this byte-oriented SubRip parser.\n", bom[type].name);
-      return (EXIT_FAILURE);
-    }
-  }
 
   // Validate the basic SubRip block structure and count subtitles.
   nsubs = 0;
@@ -244,7 +274,7 @@ main (int argc, char **argv) {
 
   // Write UTF-8 Byte Order Mark (BOM) to output file if detected in input file.
   if (type == 0) {
-    if (fwrite (bom[type].sequence, sizeof (uint8_t), (size_t) bom[type].len, fo) != (size_t) bom[type].len) {
+    if (fwrite (boms[type].sequence, sizeof (uint8_t), boms[type].len, fo) != boms[type].len) {
       fprintf (stderr, "ERROR: Unable to write Byte Order Mark to output file out.txt.\n");
       fclose (fo);
       return (EXIT_FAILURE);
@@ -373,34 +403,35 @@ readline (FILE *fi, char *line, int limit) {
   }
 }
 
-// Detect Byte Order Mark (BOM), if it exists, at beginning of line.
-// Return index of bom array corresponding to type of longest matching BOM,
-// or return -1 if none (or an unlisted type) is detected.
+// Detect a Byte Order Mark (BOM), if one exists at the beginning of the file.
+// If more than one signature is a prefix of the input, return the longest
+// matching signature. This prevents UTF-32 LE (ff fe 00 00), for example,
+// from being mistaken for UTF-16 LE (ff fe).
+// Return the index of the matching bom array entry, or -1 if none matches.
 int
-byteordermark (const char *text, const BOM *bom) {
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom, size_t nbom) {
 
-  int type, i, found, best, bestlen;
+  size_t type, best_len;
+  int best;
 
-  if ((text == NULL) || (bom == NULL)) return (-1);
+  if ((text == NULL) || (bom == NULL)) {
+    return (-1);
+  }
 
   best = -1;
-  bestlen = -1;
+  best_len = 0u;
 
-  // Test every BOM so a shorter prefix (for example UTF-16 LE) cannot hide a
-  // longer BOM (for example UTF-32 LE).
-  for (type=0; type<MAXBOM; type++) {
+  for (type=0u; type<nbom; type++) {
 
-    found = 1;
-    for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) {
-        found = 0;
-        break;
-      }
+    // The file must contain the complete signature.
+    if (bom[type].len > nbytes) {
+      continue;
     }
 
-    if (found && (bom[type].len > bestlen)) {
-      best = type;
-      bestlen = bom[type].len;
+    if ((bom[type].len > best_len) &&
+        (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
+      best = (int) type;
+      best_len = bom[type].len;
     }
   }
 

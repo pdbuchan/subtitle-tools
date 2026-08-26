@@ -31,7 +31,8 @@
 //   - strips unsupported WebVTT cue-text tags while preserving visible text;
 //   - discards ruby annotation text and intra-cue timestamp tags;
 //   - accepts either LF or CRLF input line endings;
-//   - accepts an optional UTF-8 BOM at the beginning of the input file.
+//   - accepts and skips an optional UTF-8 BOM at the beginning of the input;
+//   - rejects other recognized BOM-marked encodings before parsing.
 //
 // Usage:
 //   webvtt2srt input.webvtt
@@ -55,6 +56,13 @@
 
 #define INITIAL_LINE_SIZE 256u
 #define INITIAL_BLOCK_SIZE 8u
+#define BOM_BUFFER_SIZE 4u
+
+typedef struct {
+  size_t len;
+  const char *name;
+  const uint8_t *sequence;
+} BOM;
 
 typedef struct {
   char *text;
@@ -67,8 +75,13 @@ typedef struct {
   size_t capacity;
 } BLOCK;
 
+// Shared Byte Order Mark table.
+extern const BOM bom[];
+extern const size_t nbom;
+
 // Function prototypes.
 int append_line (BLOCK *, char *, unsigned long);
+int byteordermark (const uint8_t *, size_t, const BOM *, size_t);
 int convert_cue_text (const BLOCK *, size_t, char **);
 int convert_file (FILE *, FILE *, const char *);
 int convert_timestamp (const char *, char *, size_t);

@@ -2,7 +2,7 @@
 
 A collection of command-line tools for working with subtitle files, subtitle timing, character encodings, bitmap subtitle formats, chapter files, and colorspace conversion. The programs are written primarily in C; `ced` and `enc` include C++ code from Google Compact Encoding Detection.
 
-Before processing a SubRip file with another tool, it is generally a good idea to run [`check`](check/) and correct any reported structural errors.
+Before processing a SubRip file with another tool, ensure it uses UTF-8 character encoding. If not, convert it to UTF-8 (see `ced` and `enc` below). Then, it is generally a good idea to run [`check`](check/) and correct any reported structural errors.
 
 ## Repository layout
 
@@ -65,7 +65,7 @@ When machine-translating a SubRip (`.srt`) file from one language to another, yo
 7. Adding back subtitle numbering and timestamps using [`txt2srt`](txt2srt/).
 8. Using [Subtitle Edit](https://www.nikse.dk/subtitleedit) to split long sentences into multple lines, and correct common errors: Click on Tools, Fix common errors...
 
-It is difficult to automatically reinstate any stripped in-line markup tags from the original SubRip file onto a translated file.
+It is difficult to automatically reinstate any stripped in-line markup tags from the original SubRip file onto a translated file. You would need sophisticated language-aware software.
 
 | Directory | Description |
 |---|---|
@@ -84,6 +84,11 @@ It is difficult to automatically reinstate any stripped in-line markup tags from
 | Directory | Description |
 |---|---|
 | [`webvtt2srt/`](webvtt2srt/) | Convert WebVTT subtitles to SubRip while transferring supported markup. |
+
+## MicroDVD Tool
+| Directory | Description |
+|---|---|
+| [`microdvd2srt/`](microdvd2srt/) | Convert MicroDVD subtitles to SubRip while transferring supported markup. |
 
 ## Byte Order Mark Tools
 | Directory | Description |

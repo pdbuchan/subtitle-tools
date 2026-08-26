@@ -35,48 +35,56 @@ typedef struct {
 } BOM;
 
 // Function prototypes
-int byteordermark (const uint8_t *, size_t, const BOM *);
+int byteordermark (const uint8_t *, size_t, const BOM *, size_t);
 int copyfile (FILE *, FILE *);
 
-// Set some symbolic constants.
-#define MAXBOM 11  // Maximum number of Byte Order Mark (BOM) types
-#define BOMMAX 4   // Maximum number of bytes in a supported BOM
-#define COPYLEN 8192  // Size of buffer used while copying the file
+// Byte Order Marks are at most four bytes long in the table below.
+#define BOM_BUFFER_SIZE 4
+
+// Size of buffer used while copying the file.
+#define COPYLEN 8192
 
 int
 main (int argc, char **argv) {
 
   int type, status;
   size_t nread;
-  uint8_t input[BOMMAX];
+  uint8_t input[BOM_BUFFER_SIZE] = {0};
   FILE *fi, *fo;
 
   // Byte Order Mark (BOM) names and sequences.
-  static const uint8_t utf8[]      = {0xef, 0xbb, 0xbf};
-  static const uint8_t utf16be[]   = {0xfe, 0xff};
-  static const uint8_t utf16le[]   = {0xff, 0xfe};
-  static const uint8_t utf32be[]   = {0x00, 0x00, 0xfe, 0xff};
-  static const uint8_t utf32le[]   = {0xff, 0xfe, 0x00, 0x00};
-  static const uint8_t utf7[]      = {0x2b, 0x2f, 0x76};
-  static const uint8_t utf1[]      = {0xf7, 0x64, 0x4c};
-  static const uint8_t utfebcdic[] = {0xdd, 0x73, 0x66, 0x73};
-  static const uint8_t scsu[]      = {0x0e, 0xfe, 0xff};
-  static const uint8_t bocu1[]     = {0xfb, 0xee, 0x28};
-  static const uint8_t gb18030[]   = {0x84, 0x31, 0x95, 0x33};
+  static const uint8_t utf8[]       = {0xef, 0xbb, 0xbf};
+  static const uint8_t utf16be[]    = {0xfe, 0xff};
+  static const uint8_t utf16le[]    = {0xff, 0xfe};
+  static const uint8_t utf32be[]    = {0x00, 0x00, 0xfe, 0xff};
+  static const uint8_t utf32le[]    = {0xff, 0xfe, 0x00, 0x00};
+  static const uint8_t utf7_1[]     = {0x2b, 0x2f, 0x76, 0x38};
+  static const uint8_t utf7_2[]     = {0x2b, 0x2f, 0x76, 0x39};
+  static const uint8_t utf7_3[]     = {0x2b, 0x2f, 0x76, 0x2b};
+  static const uint8_t utf7_4[]     = {0x2b, 0x2f, 0x76, 0x2f};
+  static const uint8_t utf1[]       = {0xf7, 0x64, 0x4c};
+  static const uint8_t utfebcdic[]  = {0xdd, 0x73, 0x66, 0x73};
+  static const uint8_t scsu[]       = {0x0e, 0xfe, 0xff};
+  static const uint8_t bocu1[]      = {0xfb, 0xee, 0x28};
+  static const uint8_t gb18030[]    = {0x84, 0x31, 0x95, 0x33};
 
-  static const BOM bom[MAXBOM] = {
-    {sizeof (utf8),      "UTF-8",       utf8},
-    {sizeof (utf16be),   "UTF-16 (BE)", utf16be},
-    {sizeof (utf16le),   "UTF-16 (LE)", utf16le},
-    {sizeof (utf32be),   "UTF-32 (BE)", utf32be},
-    {sizeof (utf32le),   "UTF-32 (LE)", utf32le},
-    {sizeof (utf7),      "UTF-7",       utf7},
-    {sizeof (utf1),      "UTF-1",       utf1},
-    {sizeof (utfebcdic), "UTF-EBCDIC",  utfebcdic},
-    {sizeof (scsu),      "SCSU",        scsu},
-    {sizeof (bocu1),     "BOCU-1",      bocu1},
-    {sizeof (gb18030),   "GB18030",     gb18030}
+  static const BOM bom[] = {
+    {sizeof (utf8),      "UTF-8",        utf8},
+    {sizeof (utf16be),   "UTF-16 (BE)",  utf16be},
+    {sizeof (utf16le),   "UTF-16 (LE)",  utf16le},
+    {sizeof (utf32be),   "UTF-32 (BE)",  utf32be},
+    {sizeof (utf32le),   "UTF-32 (LE)",  utf32le},
+    {sizeof (utf7_1),    "UTF-7",        utf7_1},
+    {sizeof (utf7_2),    "UTF-7",        utf7_2},
+    {sizeof (utf7_3),    "UTF-7",        utf7_3},
+    {sizeof (utf7_4),    "UTF-7",        utf7_4},
+    {sizeof (utf1),      "UTF-1",        utf1},
+    {sizeof (utfebcdic), "UTF-EBCDIC",   utfebcdic},
+    {sizeof (scsu),      "SCSU",         scsu},
+    {sizeof (bocu1),     "BOCU-1",       bocu1},
+    {sizeof (gb18030),   "GB18030",      gb18030}
   };
+  const size_t nbom = sizeof (bom) / sizeof (bom[0]);
 
   // Process the command line arguments, if any.
   if (argc != 2) {
@@ -97,8 +105,7 @@ main (int argc, char **argv) {
 
   // Read up to the maximum supported BOM length. Short files are valid: a file
   // may consist solely of a two- or three-byte BOM.
-  memset (input, 0, sizeof (input));
-  nread = fread (input, sizeof (uint8_t), sizeof (input), fi);
+  nread = fread (input, sizeof (input[0]), BOM_BUFFER_SIZE, fi);
   if (ferror (fi)) {
     fprintf (stderr, "ERROR: Unable to read input file %s.\n", argv[1]);
     fclose (fi);
@@ -106,7 +113,7 @@ main (int argc, char **argv) {
   }
 
   // Detect any Byte Order Mark (BOM) at the beginning of the file.
-  type = byteordermark (input, nread, bom);
+  type = byteordermark (input, nread, bom, nbom);
   if (type < 0) {
     fprintf (stdout, "\nNo known existing Byte Order Mark (BOM) found in %s.\n\n", argv[1]);
     fprintf (stdout, "No action taken.\n\n");
@@ -170,28 +177,34 @@ main (int argc, char **argv) {
 }
 
 // Detect a Byte Order Mark (BOM), if one exists at the beginning of the file.
-// Return the index of the longest matching BOM, or -1 if no supported BOM is
-// present. The available byte count is supplied so short files can be checked
-// safely without reading beyond the valid input bytes.
+// If more than one signature is a prefix of the input, return the longest
+// matching signature. This prevents UTF-32 LE (ff fe 00 00), for example,
+// from being mistaken for UTF-16 LE (ff fe).
+// Return the index of the matching bom array entry, or -1 if none matches.
 int
-byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom) {
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom, size_t nbom) {
 
-  int type, best;
-  size_t bestlen;
+  size_t type, best_len;
+  int best;
 
   if ((text == NULL) || (bom == NULL)) {
     return (-1);
   }
 
   best = -1;
-  bestlen = 0;
+  best_len = 0u;
 
-  // Keep the longest complete match because some BOMs are prefixes of longer
-  // BOMs. For example, UTF-16 LE (FF FE) prefixes UTF-32 LE (FF FE 00 00).
-  for (type=0; type<MAXBOM; type++) {
-    if ((bom[type].len <= nbytes) && (bom[type].len > bestlen) && (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
-      best = type;
-      bestlen = bom[type].len;
+  for (type=0u; type<nbom; type++) {
+
+    // The file must contain the complete signature.
+    if (bom[type].len > nbytes) {
+      continue;
+    }
+
+    if ((bom[type].len > best_len) &&
+        (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
+      best = (int) type;
+      best_len = bom[type].len;
     }
   }
 

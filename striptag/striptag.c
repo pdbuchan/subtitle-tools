@@ -31,14 +31,14 @@
 
 // Definition of structs
 typedef struct {
-  int len;
+  size_t len;
   const char *name;
   const uint8_t *sequence;
 } BOM;
 
 // Function prototypes
 int readline (FILE *, char *, int);
-int byteordermark (const char *, const BOM *);
+int byteordermark (const uint8_t *, size_t, const BOM *, size_t);
 int searchandremove (char *, const char *);
 static char *find_case_insensitive (char *, const char *);
 static int starts_case_insensitive (const char *, const char *);
@@ -49,42 +49,52 @@ char **allocate_strmemp (size_t);
 
 // Set some symbolic constants.
 #define MAXLEN 1024  // Maximum number of characters per physical line
-#define MAXBOM 11  // Maximum number of Byte Order Mark (BOM) types
+#define BOM_BUFFER_SIZE 4  // Maximum number of bytes in a recognized BOM
 
 int
 main (int argc, char **argv) {
 
   int type, alllines, nlines, line, nsubs, sub, status, output_ok;
   int removeital, removebold, removeunderline, removestrikeout, removefont, removepos;
+  size_t nread;
   char *temp, **input;
   const char *filename;
+  uint8_t bom_input[BOM_BUFFER_SIZE] = {0};
   FILE *fi, *fo;
 
   // Byte Order Mark (BOM) names and sequences.
-  static const uint8_t utf8[3]       = {0xef, 0xbb, 0xbf};
-  static const uint8_t utf16be[2]    = {0xfe, 0xff};
-  static const uint8_t utf16le[2]    = {0xff, 0xfe};
-  static const uint8_t utf32be[4]    = {0x00, 0x00, 0xfe, 0xff};
-  static const uint8_t utf32le[4]    = {0xff, 0xfe, 0x00, 0x00};
-  static const uint8_t utf7[3]       = {0x2b, 0x2f, 0x76};
-  static const uint8_t utf1[3]       = {0xf7, 0x64, 0x4c};
-  static const uint8_t utfebcdic[4]  = {0xdd, 0x73, 0x66, 0x73};
-  static const uint8_t scsu[3]       = {0x0e, 0xfe, 0xff};
-  static const uint8_t bocu1[3]      = {0xfb, 0xee, 0x28};
-  static const uint8_t gb18030[4]    = {0x84, 0x31, 0x95, 0x33};
-  static const BOM bom[MAXBOM] = {
-    {3, "UTF-8", utf8},
-    {2, "UTF-16 (BE)", utf16be},
-    {2, "UTF-16 (LE)", utf16le},
-    {4, "UTF-32 (BE)", utf32be},
-    {4, "UTF-32 (LE)", utf32le},
-    {3, "UTF-7", utf7},
-    {3, "UTF-1", utf1},
-    {4, "UTF-EBCDIC", utfebcdic},
-    {3, "SCSU", scsu},
-    {3, "BOCU-1", bocu1},
-    {4, "GB18030", gb18030}
+  static const uint8_t utf8[]       = {0xef, 0xbb, 0xbf};
+  static const uint8_t utf16be[]    = {0xfe, 0xff};
+  static const uint8_t utf16le[]    = {0xff, 0xfe};
+  static const uint8_t utf32be[]    = {0x00, 0x00, 0xfe, 0xff};
+  static const uint8_t utf32le[]    = {0xff, 0xfe, 0x00, 0x00};
+  static const uint8_t utf7_1[]     = {0x2b, 0x2f, 0x76, 0x38};
+  static const uint8_t utf7_2[]     = {0x2b, 0x2f, 0x76, 0x39};
+  static const uint8_t utf7_3[]     = {0x2b, 0x2f, 0x76, 0x2b};
+  static const uint8_t utf7_4[]     = {0x2b, 0x2f, 0x76, 0x2f};
+  static const uint8_t utf1[]       = {0xf7, 0x64, 0x4c};
+  static const uint8_t utfebcdic[]  = {0xdd, 0x73, 0x66, 0x73};
+  static const uint8_t scsu[]       = {0x0e, 0xfe, 0xff};
+  static const uint8_t bocu1[]      = {0xfb, 0xee, 0x28};
+  static const uint8_t gb18030[]    = {0x84, 0x31, 0x95, 0x33};
+
+  static const BOM bom[] = {
+    {sizeof (utf8),      "UTF-8",        utf8},
+    {sizeof (utf16be),   "UTF-16 (BE)",  utf16be},
+    {sizeof (utf16le),   "UTF-16 (LE)",  utf16le},
+    {sizeof (utf32be),   "UTF-32 (BE)",  utf32be},
+    {sizeof (utf32le),   "UTF-32 (LE)",  utf32le},
+    {sizeof (utf7_1),    "UTF-7",        utf7_1},
+    {sizeof (utf7_2),    "UTF-7",        utf7_2},
+    {sizeof (utf7_3),    "UTF-7",        utf7_3},
+    {sizeof (utf7_4),    "UTF-7",        utf7_4},
+    {sizeof (utf1),      "UTF-1",        utf1},
+    {sizeof (utfebcdic), "UTF-EBCDIC",   utfebcdic},
+    {sizeof (scsu),      "SCSU",         scsu},
+    {sizeof (bocu1),     "BOCU-1",       bocu1},
+    {sizeof (gb18030),   "GB18030",      gb18030}
   };
+  const size_t nbom = sizeof (bom) / sizeof (bom[0]);
 
   // Set tag removal flags all to zero.
   removeital = 0;
@@ -144,12 +154,49 @@ main (int argc, char **argv) {
 
   fprintf (stdout, "\nInput file: %s\n", filename);
 
-  // Open existing SubRip file.
-  fi = fopen (filename, "r");
+  // Open existing SubRip file in binary mode so BOM bytes are examined exactly.
+  fi = fopen (filename, "rb");
   if (fi == NULL) {
     fprintf (stderr, "\nERROR: Unable to open input SubRip file %s.\n", filename);
     free (temp);
     return (EXIT_FAILURE);
+  }
+
+  // Read up to the maximum BOM length. A short file is valid input; it may
+  // still contain a two- or three-byte BOM.
+  nread = fread (bom_input, sizeof (bom_input[0]), BOM_BUFFER_SIZE, fi);
+  if (ferror (fi)) {
+    fprintf (stderr, "ERROR: Unable to read input SubRip file %s.\n", filename);
+    fclose (fi);
+    free (temp);
+    return (EXIT_FAILURE);
+  }
+
+  // Detect a BOM at the beginning of the file. UTF-8 is accepted and skipped.
+  // Other BOM-marked encodings require character decoding before the SRT syntax
+  // can safely be parsed byte-by-byte, so reject them with an explicit message.
+  type = byteordermark (bom_input, nread, bom, nbom);
+  if (type < 0) {
+    fprintf (stdout, "\nNo known Byte Order Mark (BOM) found in %s.\n", filename);
+    rewind (fi);
+  } else {
+    fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
+
+    if (type != 0) {
+      fprintf (stderr, "ERROR: %s input is not supported by this byte-oriented SubRip parser.\n", bom[type].name);
+      fprintf (stderr, "       Convert the file to UTF-8 first.\n");
+      fclose (fi);
+      free (temp);
+      return (EXIT_FAILURE);
+    }
+
+    // Position the stream immediately after the UTF-8 BOM.
+    if (fseek (fi, (long) bom[type].len, SEEK_SET) != 0) {
+      fprintf (stderr, "ERROR: Unable to position input SubRip file %s after its BOM.\n", filename);
+      fclose (fi);
+      free (temp);
+      return (EXIT_FAILURE);
+    }
   }
 
   // Count lines of input SubRip file.
@@ -181,7 +228,18 @@ main (int argc, char **argv) {
     return (EXIT_FAILURE);
   }
 
-  rewind (fi);
+  // Return to the beginning of subtitle text. For UTF-8 BOM input, skip the
+  // three BOM bytes again; otherwise return to byte zero.
+  if (type == 0) {
+    if (fseek (fi, (long) bom[type].len, SEEK_SET) != 0) {
+      fprintf (stderr, "ERROR: Unable to position input SubRip file %s after its BOM.\n", filename);
+      fclose (fi);
+      free (temp);
+      return (EXIT_FAILURE);
+    }
+  } else {
+    rewind (fi);
+  }
 
   // Add one slot in case a missing final blank line must be supplied.
   input = allocate_strmemp (alllines + 1);
@@ -244,29 +302,6 @@ main (int argc, char **argv) {
     fprintf (stdout, "%i lines found excluding excess trailing line-feeds.\n", nlines);
   }
 
-  // Detect any Byte Order Mark (BOM) at beginning of first line.
-  type = byteordermark (input[0], bom);
-  if (type < 0) {
-    fprintf (stdout, "\nNo known Byte Order Mark (BOM) found in %s.\n", filename);
-  } else {
-    fprintf (stdout, "\nByte Order Mark (BOM) detected for character encoding type: %s\n",
-             bom[type].name);
-
-    // This parser is byte-oriented. UTF-8 is compatible after removing its BOM,
-    // but the other BOM-marked encodings require decoding first.
-    if (type != 0) {
-      fprintf (stderr, "ERROR: %s input is not supported by this byte-oriented SubRip parser.\n", bom[type].name);
-      fprintf (stderr, "       Convert the file to UTF-8 first.\n");
-      for (line=0; line<(alllines + 1); line++) free (input[line]);
-      free (input);
-      return (EXIT_FAILURE);
-    }
-
-    // Remove UTF-8 BOM from the first logical line before parsing. It will be
-    // written explicitly to the output file later.
-    memmove (input[0], &input[0][bom[0].len], strlen (&input[0][bom[0].len]) + 1u);
-  }
-
   // Validate subtitle structure and count subtitles.
   nsubs = 0;
   line = 0;
@@ -324,8 +359,8 @@ main (int argc, char **argv) {
 
   // Preserve a UTF-8 BOM when one was present in the input file.
   if (type == 0) {
-    if (fwrite (bom[0].sequence, sizeof (uint8_t), (size_t) bom[0].len, fo) !=
-        (size_t) bom[0].len) {
+    if (fwrite (bom[type].sequence, sizeof (uint8_t), bom[type].len, fo) !=
+        bom[type].len) {
       output_ok = 0;
     }
   }
@@ -551,34 +586,35 @@ readline (FILE *fi, char *line, int limit) {
   }
 }
 
-// Detect Byte Order Mark (BOM), if it exists, at beginning of line.
-// Return index of bom array corresponding to type of BOM detected,
-// or return -1 if none (or unlisted type) detected.
+// Detect a Byte Order Mark (BOM), if one exists at the beginning of the file.
+// If more than one signature is a prefix of the input, return the longest
+// matching signature. This prevents UTF-32 LE (ff fe 00 00), for example,
+// from being mistaken for UTF-16 LE (ff fe).
+// Return the index of the matching bom array entry, or -1 if none matches.
 int
-byteordermark (const char *text, const BOM *bom) {
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom, size_t nbom) {
 
-  int type, i, found, best, bestlen;
+  size_t type, best_len;
+  int best;
 
-  if ((text == NULL) || (bom == NULL)) return (-1);
+  if ((text == NULL) || (bom == NULL)) {
+    return (-1);
+  }
 
   best = -1;
-  bestlen = 0;
+  best_len = 0u;
 
-  // Keep the longest matching BOM because some shorter BOMs are prefixes of
-  // longer ones (for example UTF-16 LE is a prefix of UTF-32 LE).
-  for (type=0; type<MAXBOM; type++) {
+  for (type=0u; type<nbom; type++) {
 
-    found = 1;
-    for (i=0; i<bom[type].len; i++) {
-      if ((uint8_t) text[i] != bom[type].sequence[i]) {
-        found = 0;
-        break;
-      }
+    // The file must contain the complete signature.
+    if (bom[type].len > nbytes) {
+      continue;
     }
 
-    if (found && (bom[type].len > bestlen)) {
-      best = type;
-      bestlen = bom[type].len;
+    if ((bom[type].len > best_len) &&
+        (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
+      best = (int) type;
+      best_len = bom[type].len;
     }
   }
 

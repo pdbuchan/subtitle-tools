@@ -54,7 +54,10 @@ main (int argc, char **argv) {
   static const uint8_t utf16le[]    = {0xff, 0xfe};
   static const uint8_t utf32be[]    = {0x00, 0x00, 0xfe, 0xff};
   static const uint8_t utf32le[]    = {0xff, 0xfe, 0x00, 0x00};
-  static const uint8_t utf7[]       = {0x2b, 0x2f, 0x76};
+  static const uint8_t utf7_1[]     = {0x2b, 0x2f, 0x76, 0x38};
+  static const uint8_t utf7_2[]     = {0x2b, 0x2f, 0x76, 0x39};
+  static const uint8_t utf7_3[]     = {0x2b, 0x2f, 0x76, 0x2b};
+  static const uint8_t utf7_4[]     = {0x2b, 0x2f, 0x76, 0x2f};
   static const uint8_t utf1[]       = {0xf7, 0x64, 0x4c};
   static const uint8_t utfebcdic[]  = {0xdd, 0x73, 0x66, 0x73};
   static const uint8_t scsu[]       = {0x0e, 0xfe, 0xff};
@@ -67,7 +70,10 @@ main (int argc, char **argv) {
     {sizeof (utf16le),   "UTF-16 (LE)",  utf16le},
     {sizeof (utf32be),   "UTF-32 (BE)",  utf32be},
     {sizeof (utf32le),   "UTF-32 (LE)",  utf32le},
-    {sizeof (utf7),      "UTF-7",        utf7},
+    {sizeof (utf7_1),    "UTF-7",        utf7_1},
+    {sizeof (utf7_2),    "UTF-7",        utf7_2},
+    {sizeof (utf7_3),    "UTF-7",        utf7_3},
+    {sizeof (utf7_4),    "UTF-7",        utf7_4},
     {sizeof (utf1),      "UTF-1",        utf1},
     {sizeof (utfebcdic), "UTF-EBCDIC",   utfebcdic},
     {sizeof (scsu),      "SCSU",         scsu},

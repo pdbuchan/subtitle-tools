@@ -14,32 +14,30 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-// webvtt2srt - Convert a WebVTT file to SubRip (.srt) format.
-//              Retain those markup features supported by SubRip format.
+#include "microdvd2srt.h"
 
-// Build: make
-
-// Run without command line arguments to see usage notes.
-// Output: out.srt
-
-#include "webvtt2srt.h"
-
+// Open the named input file and run the MicroDVD-to-SRT converter.
+//
+// The video frame rate is obtained interactively because MicroDVD timestamps
+// are frame numbers rather than absolute times. The converted subtitles are
+// written to out.srt. A partially written output file is removed if conversion
+// or file closing fails.
 int
 main (int argc, char *argv[]) {
 
-  int result, bom_type;
-  FILE *fi, *fo;
+  int result, type;
   size_t nread;
   uint8_t bom_buffer[BOM_BUFFER_SIZE] = {0};
+  long double frame_rate;
+  FILE *fi, *fo;
   const char *output_name;
 
   output_name = "out.srt";
 
-  // Exactly one WebVTT input filename is required on the command line.
+  // Exactly one MicroDVD input filename is required on the command line.
   if (argc != 2) {
-    fprintf (stdout, "\nUsage: ./webvtt2srt input.webvtt\n");
-    fprintf (stdout, "       Output filename will be out.srt.\n\n");
-    return (EXIT_SUCCESS);
+    fprintf (stderr, "Usage: %s input.sub\n", argv[0]);
+    return (EXIT_FAILURE);
   }
 
   // Refuse the obvious case where opening out.srt would truncate the input.
@@ -48,7 +46,7 @@ main (int argc, char *argv[]) {
     return (EXIT_FAILURE);
   }
 
-  // Open the WebVTT source in binary mode so readline() can handle line
+  // Open the MicroDVD source in binary mode so readline() can handle line
   // endings explicitly and consistently on all platforms.
   fi = fopen (argv[1], "rb");
   if (fi == NULL) {
@@ -56,10 +54,9 @@ main (int argc, char *argv[]) {
     return (EXIT_FAILURE);
   }
 
-  // Inspect the raw first bytes before WebVTT line parsing. WebVTT is a UTF-8
-  // format, so an optional UTF-8 BOM can simply be skipped. A BOM identifying
-  // another character encoding means the byte-oriented parser cannot safely
-  // interpret the file and it must be rejected rather than misparsed.
+  // Inspect the raw first bytes before any line-oriented parsing. UTF-8 is
+  // byte-compatible with this parser after its BOM is skipped. Other known
+  // BOM-marked encodings require transcoding, which this converter does not do.
   nread = fread (bom_buffer, sizeof (bom_buffer[0]), BOM_BUFFER_SIZE, fi);
   if (ferror (fi)) {
     fprintf (stderr, "Unable to inspect input file '%s' for a BOM: %s\n", argv[1], strerror (errno));
@@ -67,27 +64,33 @@ main (int argc, char *argv[]) {
     return (EXIT_FAILURE);
   }
 
-  bom_type = byteordermark (bom_buffer, nread, bom, nbom);
-  if (bom_type < 0) {
-    if (fseek (fi, 0L, SEEK_SET) != 0) {
-      fprintf (stderr, "Unable to position input file '%s': %s\n", argv[1], strerror (errno));
-      fclose (fi);
-      return (EXIT_FAILURE);
-    }
+  type = byteordermark (bom_buffer, nread, bom, nbom);
+  if (type < 0) {
+    fprintf (stdout, "No known Byte Order Mark (BOM) found in %s.\n", argv[1]);
   } else {
-    fprintf (stdout, "Byte Order Mark (BOM) detected for character encoding type: %s\n", bom[bom_type].name);
+    fprintf (stdout, "Byte Order Mark (BOM) detected for character encoding type: %s\n", bom[type].name);
 
-    if (bom_type != 0) {
-      fprintf (stderr, "Character encoding %s is not supported by this UTF-8 WebVTT parser.\n", bom[bom_type].name);
+    if (type != 0) {
+      fprintf (stderr, "Character encoding %s is not supported by this byte-oriented MicroDVD parser.\n", bom[type].name);
+      fprintf (stderr, "Convert the input file to UTF-8 before running microdvd2srt.\n");
       fclose (fi);
       return (EXIT_FAILURE);
     }
+  }
 
-    if (fseek (fi, (long) bom[bom_type].len, SEEK_SET) != 0) {
-      fprintf (stderr, "Unable to skip UTF-8 BOM in input file '%s': %s\n", argv[1], strerror (errno));
-      fclose (fi);
-      return (EXIT_FAILURE);
-    }
+  // Begin parsing after an accepted UTF-8 BOM, or at byte zero when no known
+  // BOM was present. scan_defaults() preserves this position between passes.
+  if (fseek (fi, (type == 0) ? (long) bom[type].len : 0L, SEEK_SET) != 0) {
+    fprintf (stderr, "Unable to position input file '%s': %s\n", argv[1], strerror (errno));
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+
+  // Ask for the frame rate before creating the output file. An invalid or
+  // missing value therefore cannot leave behind an empty out.srt file.
+  if (get_frame_rate (&frame_rate) != 0) {
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
 
   // Create the SubRip output file in binary mode. The converter itself writes
@@ -100,7 +103,7 @@ main (int argc, char *argv[]) {
   }
 
   // Perform the actual stream conversion before either file is closed.
-  result = convert_file (fi, fo, argv[1]);
+  result = convert_file (fi, fo, argv[1], frame_rate);
 
   // A close operation can itself report delayed I/O errors, so treat failure
   // to close either stream as a failed conversion.

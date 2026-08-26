@@ -50,7 +50,7 @@ typedef struct {
 
 // Function prototypes.
 int readline (FILE *, char *, int);
-int detect_bom (FILE *, const BOM *, size_t, size_t *);
+int byteordermark (const uint8_t *, size_t, const BOM *, size_t);
 int extract_time (const char *, TIME *, TIME *);
 int parsetimestamp (const char *, TIME *);
 int validate_text_file (const char *, const BOM *, size_t);
@@ -59,44 +59,53 @@ void free_filenames (char **, size_t);
 
 // Set some symbolic constants.
 #define MAXLEN 256  // Maximum number of characters per line, including terminating line-feed.
-#define MAXBOM 11
+#define BOM_BUFFER_SIZE 4  // Maximum number of bytes in a listed Byte Order Mark.
 
 int
 main (int argc, char **argv) {
 
-  int status, line, sub;
-  size_t nsubs, capacity, bom_len;
+  int status, type, line, sub;
+  size_t nsubs, capacity, nread;
   char temp[MAXLEN];
+  uint8_t bom_input[BOM_BUFFER_SIZE] = {0};
   char **textfilenames;
   TIME *start, *end;
   const char *list_filename;
   FILE *fi_list, *fi, *fo;
 
-  static const uint8_t utf8[]      = {0xef, 0xbb, 0xbf};
-  static const uint8_t utf16be[]   = {0xfe, 0xff};
-  static const uint8_t utf16le[]   = {0xff, 0xfe};
-  static const uint8_t utf32be[]   = {0x00, 0x00, 0xfe, 0xff};
-  static const uint8_t utf32le[]   = {0xff, 0xfe, 0x00, 0x00};
-  static const uint8_t utf7[]      = {0x2b, 0x2f, 0x76};
-  static const uint8_t utf1[]      = {0xf7, 0x64, 0x4c};
-  static const uint8_t utfebcdic[] = {0xdd, 0x73, 0x66, 0x73};
-  static const uint8_t scsu[]      = {0x0e, 0xfe, 0xff};
-  static const uint8_t bocu1[]     = {0xfb, 0xee, 0x28};
-  static const uint8_t gb18030[]   = {0x84, 0x31, 0x95, 0x33};
+  // Byte Order Mark (BOM) names and sequences.
+  static const uint8_t utf8[]       = {0xef, 0xbb, 0xbf};
+  static const uint8_t utf16be[]    = {0xfe, 0xff};
+  static const uint8_t utf16le[]    = {0xff, 0xfe};
+  static const uint8_t utf32be[]    = {0x00, 0x00, 0xfe, 0xff};
+  static const uint8_t utf32le[]    = {0xff, 0xfe, 0x00, 0x00};
+  static const uint8_t utf7_1[]     = {0x2b, 0x2f, 0x76, 0x38};
+  static const uint8_t utf7_2[]     = {0x2b, 0x2f, 0x76, 0x39};
+  static const uint8_t utf7_3[]     = {0x2b, 0x2f, 0x76, 0x2b};
+  static const uint8_t utf7_4[]     = {0x2b, 0x2f, 0x76, 0x2f};
+  static const uint8_t utf1[]       = {0xf7, 0x64, 0x4c};
+  static const uint8_t utfebcdic[]  = {0xdd, 0x73, 0x66, 0x73};
+  static const uint8_t scsu[]       = {0x0e, 0xfe, 0xff};
+  static const uint8_t bocu1[]      = {0xfb, 0xee, 0x28};
+  static const uint8_t gb18030[]    = {0x84, 0x31, 0x95, 0x33};
 
-  static const BOM bom[MAXBOM] = {
-    {3u, "UTF-8",        utf8},
-    {2u, "UTF-16 (BE)",  utf16be},
-    {2u, "UTF-16 (LE)",  utf16le},
-    {4u, "UTF-32 (BE)",  utf32be},
-    {4u, "UTF-32 (LE)",  utf32le},
-    {3u, "UTF-7",        utf7},
-    {3u, "UTF-1",        utf1},
-    {4u, "UTF-EBCDIC",   utfebcdic},
-    {3u, "SCSU",         scsu},
-    {3u, "BOCU-1",       bocu1},
-    {4u, "GB18030",      gb18030}
+  static const BOM bom[] = {
+    {sizeof (utf8),      "UTF-8",        utf8},
+    {sizeof (utf16be),   "UTF-16 (BE)",  utf16be},
+    {sizeof (utf16le),   "UTF-16 (LE)",  utf16le},
+    {sizeof (utf32be),   "UTF-32 (BE)",  utf32be},
+    {sizeof (utf32le),   "UTF-32 (LE)",  utf32le},
+    {sizeof (utf7_1),    "UTF-7",        utf7_1},
+    {sizeof (utf7_2),    "UTF-7",        utf7_2},
+    {sizeof (utf7_3),    "UTF-7",        utf7_3},
+    {sizeof (utf7_4),    "UTF-7",        utf7_4},
+    {sizeof (utf1),      "UTF-1",        utf1},
+    {sizeof (utfebcdic), "UTF-EBCDIC",   utfebcdic},
+    {sizeof (scsu),      "SCSU",         scsu},
+    {sizeof (bocu1),     "BOCU-1",       bocu1},
+    {sizeof (gb18030),   "GB18030",      gb18030}
   };
+  const size_t nbom = sizeof (bom) / sizeof (bom[0]);
 
   if (argc != 2) {
     fprintf (stdout, "\nUsage: ./txtfiles2srt filelistfilename\n");
@@ -118,25 +127,29 @@ main (int argc, char **argv) {
     return (EXIT_FAILURE);
   }
 
-  // A UTF-8 BOM in the list file is harmless and is skipped. Other BOM-marked
-  // encodings cannot be parsed safely by this byte-oriented program.
-  status = detect_bom (fi_list, bom, MAXBOM, &bom_len);
-  if (status < -1) {
+  // Examine the raw bytes at the start of the filename-list file before any
+  // line-oriented parsing. UTF-8 is supported after its BOM is skipped; other
+  // recognized BOM-marked encodings require transcoding first.
+  nread = fread (bom_input, sizeof (bom_input[0]), BOM_BUFFER_SIZE, fi_list);
+  if (ferror (fi_list)) {
     fprintf (stderr, "ERROR: Unable to inspect input file %s for a BOM.\n", list_filename);
     fclose (fi_list);
     return (EXIT_FAILURE);
   }
-  if (status >= 0) {
-    if (status != 0) {
-      fprintf (stderr, "ERROR: Input file %s uses %s. Convert it to UTF-8 first.\n", list_filename, bom[status].name);
-      fclose (fi_list);
-      return (EXIT_FAILURE);
-    }
-    if (fseek (fi_list, (long) bom_len, SEEK_SET) != 0) {
-      fprintf (stderr, "ERROR: Unable to skip UTF-8 BOM in %s.\n", list_filename);
-      fclose (fi_list);
-      return (EXIT_FAILURE);
-    }
+
+  type = byteordermark (bom_input, nread, bom, nbom);
+  if ((type >= 0) && (type != 0)) {
+    fprintf (stderr, "ERROR: Input file %s uses %s. Convert it to UTF-8 first.\n", list_filename, bom[type].name);
+    fclose (fi_list);
+    return (EXIT_FAILURE);
+  }
+
+  // Position the stream at the first byte of filename-list text. When no BOM
+  // was found, return to byte zero; otherwise skip the accepted UTF-8 BOM.
+  if (fseek (fi_list, (type == 0) ? (long) bom[type].len : 0L, SEEK_SET) != 0) {
+    fprintf (stderr, "ERROR: Unable to position input file %s after BOM detection.\n", list_filename);
+    fclose (fi_list);
+    return (EXIT_FAILURE);
   }
 
   // Read the filename list. Blank lines are not valid list entries.
@@ -259,7 +272,7 @@ main (int argc, char **argv) {
       return (EXIT_FAILURE);
     }
 
-    if (validate_text_file (textfilenames[sub], bom, MAXBOM) != EXIT_SUCCESS) {
+    if (validate_text_file (textfilenames[sub], bom, nbom) != EXIT_SUCCESS) {
       free (start);
       free (end);
       free_filenames (textfilenames, nsubs);
@@ -297,8 +310,10 @@ main (int argc, char **argv) {
       return (EXIT_FAILURE);
     }
 
-    status = detect_bom (fi, bom, MAXBOM, &bom_len);
-    if (status < -1) {
+    // Inspect the file again because it may have changed since validation.
+    memset (bom_input, 0, sizeof (bom_input));
+    nread = fread (bom_input, sizeof (bom_input[0]), BOM_BUFFER_SIZE, fi);
+    if (ferror (fi)) {
       fprintf (stderr, "ERROR: Unable to inspect input file %s for a BOM.\n", textfilenames[sub]);
       fclose (fi);
       fclose (fo);
@@ -308,17 +323,28 @@ main (int argc, char **argv) {
       free_filenames (textfilenames, nsubs);
       return (EXIT_FAILURE);
     }
-    if (status == 0) {
-      if (fseek (fi, (long) bom_len, SEEK_SET) != 0) {
-        fprintf (stderr, "ERROR: Unable to skip UTF-8 BOM in %s.\n", textfilenames[sub]);
-        fclose (fi);
-        fclose (fo);
-        remove ("out.srt");
-        free (start);
-        free (end);
-        free_filenames (textfilenames, nsubs);
-        return (EXIT_FAILURE);
-      }
+
+    type = byteordermark (bom_input, nread, bom, nbom);
+    if ((type >= 0) && (type != 0)) {
+      fprintf (stderr, "ERROR: Input file %s changed to unsupported %s encoding.\n", textfilenames[sub], bom[type].name);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      free (start);
+      free (end);
+      free_filenames (textfilenames, nsubs);
+      return (EXIT_FAILURE);
+    }
+
+    if (fseek (fi, (type == 0) ? (long) bom[type].len : 0L, SEEK_SET) != 0) {
+      fprintf (stderr, "ERROR: Unable to position input file %s after BOM detection.\n", textfilenames[sub]);
+      fclose (fi);
+      fclose (fo);
+      remove ("out.srt");
+      free (start);
+      free (end);
+      free_filenames (textfilenames, nsubs);
+      return (EXIT_FAILURE);
     }
 
     if ((fprintf (fo, "%i\n", sub + 1) < 0) ||
@@ -481,39 +507,38 @@ readline (FILE *fi, char *line, int limit) {
   }
 }
 
-// Detect a known BOM at the current file position without consuming it.
-// Returns its BOM-table index, -1 if no known BOM is present, or -2 on I/O error.
+// Detect a Byte Order Mark (BOM), if one exists at the beginning of the file.
+// If more than one signature is a prefix of the input, return the longest
+// matching signature. This prevents UTF-32 LE (ff fe 00 00), for example,
+// from being mistaken for UTF-16 LE (ff fe).
+// Return the index of the matching bom array entry, or -1 if none matches.
 int
-detect_bom (FILE *fi, const BOM *bom, size_t nbom, size_t *matched_len) {
+byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom, size_t nbom) {
 
-  uint8_t bytes[4];
-  size_t nread, type;
+  size_t type, best_len;
   int best;
-  size_t bestlen;
-  long pos;
 
-  if ((fi == NULL) || (bom == NULL) || (matched_len == NULL)) return (-2);
-
-  pos = ftell (fi);
-  if (pos < 0L) return (-2);
-
-  clearerr (fi);
-  nread = fread (bytes, 1u, sizeof (bytes), fi);
-  if (ferror (fi)) return (-2);
-
-  if (fseek (fi, pos, SEEK_SET) != 0) return (-2);
+  if ((text == NULL) || (bom == NULL)) {
+    return (-1);
+  }
 
   best = -1;
-  bestlen = 0u;
-  for (type = 0u; type < nbom; type++) {
-    if ((bom[type].len <= nread) && (bom[type].len > bestlen) &&
-        (memcmp (bytes, bom[type].sequence, bom[type].len) == 0)) {
+  best_len = 0u;
+
+  for (type=0u; type<nbom; type++) {
+
+    // The file must contain the complete signature.
+    if (bom[type].len > nbytes) {
+      continue;
+    }
+
+    if ((bom[type].len > best_len) &&
+        (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
       best = (int) type;
-      bestlen = bom[type].len;
+      best_len = bom[type].len;
     }
   }
 
-  *matched_len = bestlen;
   return (best);
 }
 
@@ -605,7 +630,8 @@ validate_text_file (const char *filename, const BOM *bom, size_t nbom) {
   FILE *fi;
   char line[MAXLEN];
   int status, bomtype, lineno, ntext;
-  size_t bom_len;
+  size_t nread;
+  uint8_t bom_input[BOM_BUFFER_SIZE] = {0};
 
   fi = fopen (filename, "rb");
   if (fi == NULL) {
@@ -613,23 +639,26 @@ validate_text_file (const char *filename, const BOM *bom, size_t nbom) {
     return (EXIT_FAILURE);
   }
 
-  bomtype = detect_bom (fi, bom, nbom, &bom_len);
-  if (bomtype < -1) {
+  // Inspect raw bytes before readline() so multi-byte encodings containing NUL
+  // bytes cannot be mistaken for ordinary text.
+  nread = fread (bom_input, sizeof (bom_input[0]), BOM_BUFFER_SIZE, fi);
+  if (ferror (fi)) {
     fprintf (stderr, "ERROR: Unable to inspect input file %s for a BOM.\n", filename);
     fclose (fi);
     return (EXIT_FAILURE);
   }
-  if (bomtype >= 0) {
-    if (bomtype != 0) {
-      fprintf (stderr, "ERROR: Input file %s uses %s. Convert it to UTF-8 first.\n", filename, bom[bomtype].name);
-      fclose (fi);
-      return (EXIT_FAILURE);
-    }
-    if (fseek (fi, (long) bom_len, SEEK_SET) != 0) {
-      fprintf (stderr, "ERROR: Unable to skip UTF-8 BOM in %s.\n", filename);
-      fclose (fi);
-      return (EXIT_FAILURE);
-    }
+
+  bomtype = byteordermark (bom_input, nread, bom, nbom);
+  if ((bomtype >= 0) && (bomtype != 0)) {
+    fprintf (stderr, "ERROR: Input file %s uses %s. Convert it to UTF-8 first.\n", filename, bom[bomtype].name);
+    fclose (fi);
+    return (EXIT_FAILURE);
+  }
+
+  if (fseek (fi, (bomtype == 0) ? (long) bom[bomtype].len : 0L, SEEK_SET) != 0) {
+    fprintf (stderr, "ERROR: Unable to position input file %s after BOM detection.\n", filename);
+    fclose (fi);
+    return (EXIT_FAILURE);
   }
 
   lineno = 0;

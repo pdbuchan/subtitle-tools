@@ -43,8 +43,9 @@ convert_file (FILE *fi, FILE *fo, const char *input_name) {
   in_header = 1;
   result = -1;
 
-  // WebVTT requires the first physical line to contain the WEBVTT signature,
-  // optionally preceded by a UTF-8 BOM.
+  // WebVTT requires the first logical line to contain the WEBVTT signature.
+  // Any optional UTF-8 BOM has already been consumed before this function is
+  // called, so the header parser sees only WebVTT text.
   status = readline (fi, &line);
   if (status < 0) {
     fprintf (stderr, "Error reading '%s': %s\n", input_name, strerror (errno));

@@ -3,7 +3,7 @@ CCFLAGS =
 LIBS = -lm
 DEBUG = -Wall -Wextra -Wpedantic -g
 
-OBJS = append_line.o convert_cue_text.o convert_file.o convert_timestamp.o convert_timing_line.o free_block.o \
+OBJS = append_line.o byteordermark.o convert_cue_text.o convert_file.o convert_timestamp.o convert_timing_line.o free_block.o \
        is_webvtt_header.o main.o process_block.o readline.o starts_keyword.o
 
 all: webvtt2srt

@@ -13,6 +13,8 @@ Read a WebVTT (`.webvtt`) file and convert contents to SubRip format and save to
 * Annotative/pronunciation tags `<ruby>` are discarded, base text is retained.
 * Pronunciation/annotation text itself appearing within `<rt>...</rt>` is discarded.
 * Internal timestamps such as `<00:01.500>` are discarded.
+* An optional UTF-8 Byte Order Mark (BOM) at the beginning of the WebVTT file is accepted and skipped.
+* Other recognized BOM-marked encodings are rejected because WebVTT input is parsed as UTF-8.
 
 ## Build
 
