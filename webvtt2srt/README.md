@@ -5,7 +5,7 @@ Read a WebVTT (`.webvtt`) file and convert contents to SubRip format and save to
 ## Limitations
 
 * Bold, italics, and underline markups are preserved.
-* Standard WebVTT colors are converted to SubRip format colors. For example, `<c.red>` is converted to `font color="#FF0000">`.
+* Standard WebVTT colors are converted to SubRip format colors. For example, `<c.red>` is converted to `<font color="#FF0000">`.
 * The color `green`, if it appears in a WebVTT file, is treated as an alias for the WebVTT color `lime`.
 * Where multiple `<c>` classes appear, the last recognized foreground color is used.
 * The WebVTT background class `bg_*` is ignored since it isn't supported in SubRip format.
