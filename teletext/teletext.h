@@ -17,18 +17,18 @@
 #ifndef TELETEXT_H
 #define TELETEXT_H
 
-#include <errno.h>
-#include <fcntl.h>
-#include <inttypes.h>
-#include <limits.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <errno.h>
 
 #define MAX_STRINGLEN 512
 #define MAX_PIDS 8192

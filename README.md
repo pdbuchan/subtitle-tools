@@ -80,6 +80,11 @@ It is difficult to automatically reinstate any stripped in-line markup tags from
 | [`ssa2srt/`](ssa2srt/) | Convert SubStation Alpha subtitles to SubRip while transferring supported styles and markup. |
 | [`ssa2srt-nostyles/`](ssa2srt-nostyles/) | Convert SubStation Alpha subtitles to SubRip without transferring style definitions. |
 
+## WebVTT Tool
+| Directory | Description |
+|---|---|
+| [`webvtt2srt/`](webvtt2srt/) | Convert WebVTT subtitles to SubRip while transferring supported markup. |
+
 ## Byte Order Mark Tools
 | Directory | Description |
 |---|---|
