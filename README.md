@@ -6,7 +6,7 @@ Before processing a SubRip file with another tool, it is generally a good idea t
 
 ## Repository layout
 
-Each tool has its own directory at the repository root. A single-file program keeps its source file and README directly in that directory; larger projects such as `sub`, `pgs`, and `dvb` retain their existing multi-file layouts. An additional `src/` layer would not add useful organization here and would make individual tools less convenient to browse and build.
+Each tool has its own directory at the repository root. A single-file program keeps its source file and README directly in that directory; larger projects such as `sub`, `pgs`, `dvb`, and `teletext` retain their existing multi-file layouts. An additional `src/` layer would not add useful organization here and would make individual tools less convenient to browse and build.
 
 ## Check Tool
 
