@@ -335,15 +335,14 @@ byteordermark (const uint8_t *text, size_t nbytes, const BOM *table, size_t ntyp
   best = -1;
   best_len = 0u;
 
-  for (type=0u; type<ntypes; type++) {
+  for (type = 0u; type < ntypes; type++) {
 
     // The file must contain the complete signature.
     if (table[type].len > nbytes) {
       continue;
     }
 
-    if ((table[type].len > best_len) &&
-        (memcmp (text, table[type].sequence, table[type].len) == 0)) {
+    if ((table[type].len > best_len) && (memcmp (text, table[type].sequence, table[type].len) == 0)) {
       best = (int) type;
       best_len = table[type].len;
     }

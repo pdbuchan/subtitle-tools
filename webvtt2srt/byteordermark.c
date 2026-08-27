@@ -75,15 +75,14 @@ byteordermark (const uint8_t *text, size_t nbytes, const BOM *list, size_t nlist
   best = -1;
   best_len = 0u;
 
-  for (type=0u; type<nlist; type++) {
+  for (type = 0u; type < nlist; type++) {
 
     // The input must contain the complete signature.
     if (list[type].len > nbytes) {
       continue;
     }
 
-    if ((list[type].len > best_len) &&
-        (memcmp (text, list[type].sequence, list[type].len) == 0)) {
+    if ((list[type].len > best_len) && (memcmp (text, list[type].sequence, list[type].len) == 0)) {
       best = (int) type;
       best_len = list[type].len;
     }

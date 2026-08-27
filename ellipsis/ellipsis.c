@@ -546,15 +546,14 @@ byteordermark (const uint8_t *text, size_t nbytes, const BOM *bom, size_t nbom) 
   best = -1;
   best_len = 0u;
 
-  for (type=0u; type<nbom; type++) {
+  for (type = 0u; type < nbom; type++) {
 
     // The file must contain the complete signature.
     if (bom[type].len > nbytes) {
       continue;
     }
 
-    if ((bom[type].len > best_len) &&
-        (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
+    if ((bom[type].len > best_len) && (memcmp (text, bom[type].sequence, bom[type].len) == 0)) {
       best = (int) type;
       best_len = bom[type].len;
     }
