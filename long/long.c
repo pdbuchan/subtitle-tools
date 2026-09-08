@@ -14,9 +14,9 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-// long.c - Read a SubRip (.srt) file and combine any two-line subtitle to a single line in order to have complete
-//          sentences on a line. Really only designed for characters encountered in English and French.
-//          If a UTF-8 Byte Order Mark (BOM) exists in the input file, it will be included in the output file.
+// long.c - Read a UTF-8 SubRip (.srt) file and combine any two-line subtitle to a single line in order to have
+//          complete sentences on a line. Latin and Cyrillic letters are recognized without attempting to identify
+//          the language of the subtitle. If a UTF-8 Byte Order Mark (BOM) exists, it is included in the output file.
 
 // gcc -Wall long.c -o long
 
@@ -38,7 +38,10 @@ typedef struct {
 } BOM;
 
 // Function prototypes
-int is_french (const char *);
+int is_joinable_line_end (const char *);
+static int utf8_next_codepoint (const unsigned char *, size_t, size_t *, uint32_t *);
+static int is_supported_letter (uint32_t);
+static int is_combining_mark (uint32_t);
 int readline (FILE *, char *, int);
 int byteordermark (const uint8_t *, size_t, const BOM *, size_t);
 static void *allocate_mem (size_t, size_t, const char *);
@@ -359,26 +362,12 @@ main (int argc, char **argv) {
       val = (unsigned char) input[i][len - 2];
 
       // Only exactly two-line subtitles are candidates for joining, as stated
-      // in the program description. Leave subtitles with one or 3+ text lines
-      // otherwise unchanged.
-      if ((line == 0) && (ntext[sub] == 2) &&
-          ((val == ',') || (val == '>') ||
-           ((val > 34) && (val < 44)) ||       // #, $, %, &, ', (, ), *, +
-           ((val > 47) && (val < 60)) ||       // 0 - 9, :, ;
-           ((val > 64) && (val < 92)) ||       // A - Z, [
-           ((val > 96) && (val < 124)) ||      // a - z, {
-           (val == ']'))) {
+      // in the program description. The test understands the ASCII endings
+      // accepted by the original program as well as UTF-8 Latin and Cyrillic
+      // letters. Leave subtitles with one or 3+ text lines otherwise unchanged.
+      if ((line == 0) && (ntext[sub] == 2) && is_joinable_line_end (input[i])) {
 
         // Replace the first line-feed with a space before writing line two.
-        if (fwrite (input[i], sizeof (char), (size_t) (len - 1), fo) != (size_t) (len - 1) || fputc (' ', fo) == EOF) {
-          fprintf (stderr, "ERROR: Unable to write subtitle %i to out.srt.\n", sub + 1);
-          fclose (fo);
-          exit (EXIT_FAILURE);
-        }
-
-      // French accented character at the end of the first line.
-      } else if ((line == 0) && (ntext[sub] == 2) && is_french (input[i])) {
-
         if (fwrite (input[i], sizeof (char), (size_t) (len - 1), fo) != (size_t) (len - 1) || fputc (' ', fo) == EOF) {
           fprintf (stderr, "ERROR: Unable to write subtitle %i to out.srt.\n", sub + 1);
           fclose (fo);
@@ -441,28 +430,214 @@ main (int argc, char **argv) {
   return (EXIT_SUCCESS);
 }
 
-// Check whether a line ends with one of the French accented characters handled
-// by this program immediately before its retained line-feed.
-// Return 0 if no match, 1 if a match.
+// Check whether the first text line of a two-line subtitle ends in a character
+// for which the line break can safely be replaced by a space. This preserves
+// the ASCII behavior of the original English/French implementation and adds
+// UTF-8 Latin and Cyrillic letters without attempting to determine language.
+//
+// A decomposed accented character is also accepted. For example, an "e"
+// followed by U+0301 COMBINING ACUTE ACCENT is treated like the precomposed
+// character U+00E9 (é).
+//
+// Return 0 if the line ending is not joinable or if malformed UTF-8 is found;
+// return 1 if the line ending is joinable.
 int
-is_french (const char *line) {
+is_joinable_line_end (const char *line) {
 
-  size_t i, linelen, charlen;
-  static const char *character[] = {
-    "à", "é", "è", "ù", "â", "ê", "î", "ô", "û", "ë", "ï", "ü", "ç",
-    "À", "É", "È", "Ù", "Â", "Ê", "Î", "Ô", "Û", "Ë", "Ï", "Ü", "Ç"
-  };
+  size_t index, linelen, textlen;
+  uint32_t codepoint, last_noncombining;
+  unsigned char val;
 
   if (line == NULL) return (0);
 
   linelen = strlen (line);
   if ((linelen < 2u) || (line[linelen - 1u] != '\n')) return (0);
 
-  for (i = 0u; i < (sizeof (character) / sizeof (character[0])); i++) {
-    charlen = strlen (character[i]);
-    if ((linelen >= charlen + 1u) && (memcmp (&line[linelen - charlen - 1u], character[i], charlen) == 0)) {
-      return (1);
+  // Preserve exactly the ASCII endings accepted by the original program.
+  // A UTF-8 continuation byte is always >= 0x80, so a non-ASCII character
+  // cannot accidentally satisfy any of these tests.
+  val = (unsigned char) line[linelen - 2u];
+  if ((val == ',') || (val == '>') ||
+      ((val > 34u) && (val < 44u)) ||       // #, $, %, &, ', (, ), *, +
+      ((val > 47u) && (val < 60u)) ||       // 0 - 9, :, ;
+      ((val > 64u) && (val < 92u)) ||       // A - Z, [
+      ((val > 96u) && (val < 124u)) ||      // a - z, {
+      (val == ']')) {
+    return (1);
+  }
+
+  // Nothing further is needed for an ASCII line ending that failed the
+  // original test. In particular, leave '.', '!', '?', '-', and similar
+  // punctuation unchanged so existing behavior is preserved.
+  if (val < 0x80u) return (0);
+
+  // Decode the UTF-8 text up to, but not including, the retained line-feed.
+  // Keep the last non-combining code point so a trailing sequence of one or
+  // more combining accents can be associated with its base letter.
+  textlen = linelen - 1u;
+  index = 0u;
+  last_noncombining = 0u;
+
+  while (index < textlen) {
+    if (!utf8_next_codepoint ((const unsigned char *) line, textlen, &index, &codepoint)) {
+      return (0);
     }
+
+    if (!is_combining_mark (codepoint)) {
+      last_noncombining = codepoint;
+    }
+  }
+
+  // If the final code point is a letter, last_noncombining is that letter. If
+  // the line ends in combining marks, last_noncombining is their base code
+  // point. If the line ends in ordinary punctuation, last_noncombining is that
+  // punctuation. Thus a single test covers all three cases.
+  return (is_supported_letter (last_noncombining));
+}
+
+// Decode one UTF-8 code point beginning at text[*index]. The supplied length
+// excludes the terminating null byte and, for subtitle lines, the retained
+// line-feed. On success, advance *index past the complete code point, store the
+// Unicode scalar value in *codepoint, and return 1. Return 0 for malformed
+// UTF-8, truncated sequences, surrogate code points, or values above U+10FFFF.
+static int
+utf8_next_codepoint (const unsigned char *text, size_t len, size_t *index, uint32_t *codepoint) {
+
+  size_t i;
+  uint32_t value;
+  unsigned char c0, c1, c2, c3;
+
+  if ((text == NULL) || (index == NULL) || (codepoint == NULL) || (*index >= len)) {
+    return (0);
+  }
+
+  i = *index;
+  c0 = text[i];
+
+  // ASCII: 0xxxxxxx
+  if (c0 < 0x80u) {
+    *codepoint = (uint32_t) c0;
+    *index = i + 1u;
+    return (1);
+  }
+
+  // Two-byte sequence: 110xxxxx 10xxxxxx. Values C0 and C1 would encode an
+  // ASCII character non-canonically, so a valid leading byte begins at C2.
+  if ((c0 >= 0xc2u) && (c0 <= 0xdfu)) {
+    if ((i + 1u) >= len) return (0);
+
+    c1 = text[i + 1u];
+    if ((c1 & 0xc0u) != 0x80u) return (0);
+
+    value = ((uint32_t) (c0 & 0x1fu) << 6) |
+             (uint32_t) (c1 & 0x3fu);
+
+    *codepoint = value;
+    *index = i + 2u;
+    return (1);
+  }
+
+  // Three-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx.
+  if ((c0 >= 0xe0u) && (c0 <= 0xefu)) {
+    if ((i + 2u) >= len) return (0);
+
+    c1 = text[i + 1u];
+    c2 = text[i + 2u];
+    if (((c1 & 0xc0u) != 0x80u) || ((c2 & 0xc0u) != 0x80u)) return (0);
+
+    // E0 80..9F would be an overlong encoding. ED A0..BF would encode a
+    // UTF-16 surrogate, which is not a Unicode scalar value.
+    if ((c0 == 0xe0u) && (c1 < 0xa0u)) return (0);
+    if ((c0 == 0xedu) && (c1 >= 0xa0u)) return (0);
+
+    value = ((uint32_t) (c0 & 0x0fu) << 12) |
+            ((uint32_t) (c1 & 0x3fu) << 6) |
+             (uint32_t) (c2 & 0x3fu);
+
+    *codepoint = value;
+    *index = i + 3u;
+    return (1);
+  }
+
+  // Four-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx. F0 80..8F
+  // would be overlong, while F4 90..BF would exceed the Unicode maximum.
+  if ((c0 >= 0xf0u) && (c0 <= 0xf4u)) {
+    if ((i + 3u) >= len) return (0);
+
+    c1 = text[i + 1u];
+    c2 = text[i + 2u];
+    c3 = text[i + 3u];
+    if (((c1 & 0xc0u) != 0x80u) || ((c2 & 0xc0u) != 0x80u) || ((c3 & 0xc0u) != 0x80u)) return (0);
+
+    if ((c0 == 0xf0u) && (c1 < 0x90u)) return (0);
+    if ((c0 == 0xf4u) && (c1 > 0x8fu)) return (0);
+
+    value = ((uint32_t) (c0 & 0x07u) << 18) |
+            ((uint32_t) (c1 & 0x3fu) << 12) |
+            ((uint32_t) (c2 & 0x3fu) << 6) |
+             (uint32_t) (c3 & 0x3fu);
+
+    *codepoint = value;
+    *index = i + 4u;
+    return (1);
+  }
+
+  // Continuation bytes, obsolete five/six-byte forms, and F5..FF cannot begin
+  // a valid modern UTF-8 sequence.
+  return (0);
+}
+
+// Return 1 for Latin and Cyrillic letters useful to the subtitle languages
+// supported here. Latin-1 and Latin Extended-A include the accented letters
+// needed by French, Spanish, Portuguese, Danish, Norwegian, Finnish, Swedish,
+// and many other European languages. Additional Latin blocks are inexpensive
+// to recognize and avoid making future language support depend on new tables.
+// Cyrillic covers Russian and Ukrainian, including Ukrainian Ґ/ґ (U+0490/91).
+static int
+is_supported_letter (uint32_t codepoint) {
+
+  // Basic Latin letters.
+  if (((codepoint >= 0x0041u) && (codepoint <= 0x005au)) ||
+      ((codepoint >= 0x0061u) && (codepoint <= 0x007au))) {
+    return (1);
+  }
+
+  // Latin-1 Supplement letters, excluding multiplication and division signs.
+  if (((codepoint >= 0x00c0u) && (codepoint <= 0x00d6u)) ||
+      ((codepoint >= 0x00d8u) && (codepoint <= 0x00f6u)) ||
+      ((codepoint >= 0x00f8u) && (codepoint <= 0x00ffu))) {
+    return (1);
+  }
+
+  // Latin Extended-A, Latin Extended-B, and Latin Extended Additional.
+  if (((codepoint >= 0x0100u) && (codepoint <= 0x024fu)) ||
+      ((codepoint >= 0x1e00u) && (codepoint <= 0x1effu))) {
+    return (1);
+  }
+
+  // Cyrillic and Cyrillic Supplement. U+0483..U+0489 are combining marks,
+  // so exclude them here; they are handled separately by is_combining_mark().
+  if (((codepoint >= 0x0400u) && (codepoint <= 0x0482u)) ||
+      ((codepoint >= 0x048au) && (codepoint <= 0x052fu))) {
+    return (1);
+  }
+
+  return (0);
+}
+
+// Return 1 for combining-mark ranges that can occur after Latin or Cyrillic
+// base letters. The common decomposed European accents are in U+0300..U+036F;
+// the additional ranges cost little to support and make the UTF-8 handling
+// more complete without requiring Unicode normalization or an external library.
+static int
+is_combining_mark (uint32_t codepoint) {
+
+  if (((codepoint >= 0x0300u) && (codepoint <= 0x036fu)) ||
+      ((codepoint >= 0x0483u) && (codepoint <= 0x0489u)) ||
+      ((codepoint >= 0x1ab0u) && (codepoint <= 0x1affu)) ||
+      ((codepoint >= 0x1dc0u) && (codepoint <= 0x1dffu)) ||
+      ((codepoint >= 0xfe20u) && (codepoint <= 0xfe2fu))) {
+    return (1);
   }
 
   return (0);
