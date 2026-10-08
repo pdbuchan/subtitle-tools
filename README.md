@@ -1,12 +1,12 @@
 # Subtitle Tools in C
 
-A collection of command-line tools for working with subtitle files, subtitle timing, character encodings, bitmap subtitle formats, chapter files, and colorspace conversion. The programs are written primarily in C; `ced` and `enc` include C++ code from Google Compact Encoding Detection.
+A collection of command-line tools for working with subtitle files, subtitle timing, character encodings, bitmap subtitle formats, chapter files, and colorspace conversion. The programs are written primarily in C; [`ced`](ced/) and [`enc`](enc/) include C++ code from Google Compact Encoding Detection.
 
-Before processing a SubRip file with another tool, ensure it uses UTF-8 character encoding. If not, convert it to UTF-8 (see `ced` and `enc` below). Then, it is generally a good idea to run [`check`](check/) and correct any reported structural errors.
+Before processing a SubRip file with another tool, ensure it uses UTF-8 character encoding. If not, convert it to UTF-8 (see [`ced`](ced/) and [`enc`](enc/) below). Then, it is generally a good idea to run [`check`](check/) and correct any reported structural errors.
 
 ## Repository layout
 
-Each tool has its own directory at the repository root. A single-file program keeps its source file and README directly in that directory; larger projects such as `sub`, `pgs`, `dvb`, `teletext`, `microdvd2srt`, and `webvtt2srt` retain their existing multi-file layouts. An additional `src/` layer would not add useful organization here and would make individual tools less convenient to browse and build.
+Each tool has its own directory at the repository root. A single-file program keeps its source file and README directly in that directory; larger projects such as [`sub`](sub/), [`pgs`](pgs/), [`dvb`](dvb/), [`teletext`](teletext/), [`microdvd2srt`](microdvd2srt/), and [`webvtt2srt`](webvtt2srt/) retain their existing multi-file layouts. An additional `src/` layer would not add useful organization here and would make individual tools less convenient to browse and build.
 
 ## Check Tool
 
